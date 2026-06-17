@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>XC Training — Data Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root { --bg:#0b0b0d; --card:#161619; --line:#26262b; --red:#ff3b30; --muted:#8a8a92; --text:#f2f2f5; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         background:var(--bg); color:var(--text); }
+  header { padding:20px 24px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:12px; }
+  header h1 { font-size:18px; margin:0; font-weight:700; }
+  header .dot { width:10px; height:10px; border-radius:50%; background:var(--red); }
+  header .spacer { flex:1; }
+  header button { background:transparent; color:var(--muted); border:1px solid var(--line);
+                  padding:6px 12px; border-radius:8px; cursor:pointer; font-size:13px; }
+  main { padding:24px; max-width:1100px; margin:0 auto; }
+
+  /* Login */
+  #login { max-width:340px; margin:80px auto; background:var(--card); padding:28px; border-radius:16px; border:1px solid var(--line); }
+  #login h2 { margin:0 0 18px; font-size:20px; }
+  #login input { width:100%; padding:11px 12px; margin-bottom:12px; background:#0e0e11; border:1px solid var(--line);
+                 border-radius:10px; color:var(--text); font-size:14px; }
+  #login button { width:100%; padding:12px; background:var(--red); color:#fff; border:none; border-radius:10px;
+                  font-size:15px; font-weight:600; cursor:pointer; }
+  .err { color:var(--red); font-size:13px; min-height:18px; margin-top:4px; }
+
+  /* Cards */
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:14px; margin-bottom:24px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:18px; }
+  .card .label { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.5px; }
+  .card .value { font-size:28px; font-weight:700; margin-top:6px; }
+  .card .value.hr { color:var(--red); }
+  .card .sub { color:var(--muted); font-size:12px; margin-top:4px; }
+
+  .panel { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:18px; margin-bottom:24px; }
+  .panel-head { display:flex; align-items:center; gap:12px; margin-bottom:14px; }
+  .panel-head h3 { margin:0; font-size:15px; }
+  .panel-head .spacer { flex:1; }
+  select { background:#0e0e11; color:var(--text); border:1px solid var(--line); border-radius:8px; padding:7px 10px; font-size:13px; }
+  canvas { max-height:320px; }
+
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:9px 10px; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:500; font-size:11px; text-transform:uppercase; letter-spacing:.5px; }
+  td.num { font-variant-numeric: tabular-nums; }
+  .hidden { display:none; }
+  .muted { color:var(--muted); }
+</style>
+</head>
+<body>
+
+<div id="login">
+  <h2>XC Training</h2>
+  <input id="email" type="email" placeholder="Email" value="warren@xctraining.app" />
+  <input id="password" type="password" placeholder="Password" value="xctraining123" />
+  <button onclick="doLogin()">Sign in</button>
+  <div class="err" id="loginErr"></div>
+</div>
+
+<div id="app" class="hidden">
+  <header>
+    <span class="dot"></span>
+    <h1>XC Training — Data Dashboard</h1>
+    <span class="spacer"></span>
+    <span class="muted" id="who" style="font-size:13px;margin-right:8px;"></span>
+    <button onclick="logout()">Sign out</button>
+  </header>
+  <main>
+    <div class="cards" id="cards"></div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <h3>Time series</h3>
+        <span class="spacer"></span>
+        <select id="typeSel" onchange="loadSeries()"></select>
+      </div>
+      <canvas id="chart"></canvas>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h3>Recent samples</h3></div>
+      <table>
+        <thead><tr><th>Type</th><th>Value</th><th>Unit</th><th>Source</th><th>Recorded</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </main>
+</div>
+
+<script>
+const API = ''; // same origin
+let token = localStorage.getItem('xc_token') || '';
+let chart = null;
+
+function authHeaders() { return { 'Authorization': 'Bearer ' + token }; }
+
+async function doLogin() {
+  const email = document.getElementById('email').value.trim();
+  const password = document.getElementById('password').value;
+  const errEl = document.getElementById('loginErr');
+  errEl.textContent = '';
+  try {
+    const r = await fetch(API + '/v1/auth/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    });
+    const j = await r.json();
+    if (!r.ok) { errEl.textContent = j.error || 'Login failed'; return; }
+    token = j.token;
+    localStorage.setItem('xc_token', token);
+    document.getElementById('who').textContent = j.email;
+    showApp();
+  } catch (e) { errEl.textContent = 'Cannot reach server'; }
+}
+
+function logout() { token=''; localStorage.removeItem('xc_token'); location.reload(); }
+
+function showApp() {
+  document.getElementById('login').classList.add('hidden');
+  document.getElementById('app').classList.remove('hidden');
+  loadSummary();
+  loadRecent();
+}
+
+const fmtNum = n => (n==null ? '—' : (Math.round(n*100)/100).toLocaleString());
+const fmtDate = s => { const d=new Date(s); return isNaN(d)? s : d.toLocaleString(); };
+
+async function loadSummary() {
+  const r = await fetch(API + '/v1/summary', { headers: authHeaders() });
+  if (r.status === 401) return logout();
+  const j = await r.json();
+
+  const hr = j.types.find(t => t.type === 'HEART_RATE');
+  const cards = [
+    { label:'Total samples', value: fmtNum(j.totals.samples) },
+    { label:'Avg heart rate', value: hr ? fmtNum(hr.avg) : '—', sub: hr ? `min ${fmtNum(hr.min)} • max ${fmtNum(hr.max)} bpm` : '', hr:true },
+    { label:'Total steps', value: fmtNum(j.totals.steps) },
+    { label:'Distance', value: fmtNum(j.totals.distanceMeters/1000) + ' km' },
+    { label:'Calories', value: fmtNum(j.totals.calories) + ' kcal' },
+    { label:'Data types', value: j.types.length },
+  ];
+  document.getElementById('cards').innerHTML = cards.map(c =>
+    `<div class="card"><div class="label">${c.label}</div>
+     <div class="value ${c.hr?'hr':''}">${c.value}</div>
+     ${c.sub?`<div class="sub">${c.sub}</div>`:''}</div>`).join('');
+
+  // Populate type selector (numeric types only make sense for the chart)
+  const sel = document.getElementById('typeSel');
+  const numericTypes = j.types.filter(t => t.avg != null);
+  sel.innerHTML = numericTypes.map(t => `<option value="${t.type}">${t.type} (${t.count})</option>`).join('');
+  if (numericTypes.length) loadSeries();
+}
+
+async function loadSeries() {
+  const type = document.getElementById('typeSel').value;
+  if (!type) return;
+  const r = await fetch(API + `/v1/series?type=${encodeURIComponent(type)}&buckets=300`, { headers: authHeaders() });
+  if (r.status === 401) return logout();
+  const j = await r.json();
+
+  const labels = j.points.map(p => fmtDate(p.t));
+  const data = j.points.map(p => Math.round(p.v*100)/100);
+
+  if (chart) chart.destroy();
+  chart = new Chart(document.getElementById('chart'), {
+    type: 'line',
+    data: { labels, datasets: [{
+      label: type, data, borderColor:'#ff3b30', backgroundColor:'rgba(255,59,48,.12)',
+      borderWidth:1.5, pointRadius:0, fill:true, tension:.25,
+    }]},
+    options: {
+      responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{ labels:{ color:'#8a8a92' } } },
+      scales:{
+        x:{ ticks:{ color:'#8a8a92', maxTicksLimit:8 }, grid:{ color:'#26262b' } },
+        y:{ ticks:{ color:'#8a8a92' }, grid:{ color:'#26262b' } },
+      },
+    },
+  });
+}
+
+async function loadRecent() {
+  const r = await fetch(API + '/v1/health-samples?limit=50', { headers: authHeaders() });
+  if (r.status === 401) return logout();
+  const j = await r.json();
+  document.getElementById('rows').innerHTML = j.samples.map(s => {
+    let val = s.numeric_value != null ? fmtNum(s.numeric_value)
+            : (s.value && s.value.workoutActivityType ? s.value.workoutActivityType : '—');
+    return `<tr><td>${s.type}</td><td class="num">${val}</td><td class="muted">${s.unit}</td>
+            <td class="muted">${s.source_name||s.source_platform||'—'}</td>
+            <td class="muted">${fmtDate(s.date_to)}</td></tr>`;
+  }).join('');
+}
+
+// Auto-enter if we already have a token
+if (token) {
+  fetch(API + '/v1/summary', { headers: authHeaders() }).then(r => {
+    if (r.ok) showApp(); else logout();
+  }).catch(()=>{});
+}
+</script>
+</body>
+</html>

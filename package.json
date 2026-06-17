@@ -1,0 +1,12 @@
+{
+  "name": "xc-server",
+  "version": "1.0.0",
+  "description": "XC Training health-tracking backend (zero-dependency, Node built-ins)",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/index.js"
+  }
+}
