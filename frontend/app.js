@@ -215,11 +215,9 @@ async function showRoster() {
       <td class="num">${a.grade ?? "—"}</td>
     </tr>`).join("");
   tbody.querySelectorAll("tr.clickable").forEach((tr) => {
-    tr.onclick = () => {
-      document.getElementById("viewingBar").hidden = false;
-      document.getElementById("viewingWho").textContent = "Viewing " + tr.dataset.name;
-      loadDashboard(Number(tr.dataset.id)).catch(console.error);
-    };
+    tr.onclick = () =>
+      coachViewAthlete(Number(tr.dataset.id), tr.dataset.name, true)
+        .catch(console.error);
   });
 }
 
@@ -235,20 +233,60 @@ function showSignIn() {
   initAuth().then(({ config }) => renderSignIn(config));
 }
 
+// The coach's "which athlete am I viewing" lives in the URL (?athlete_id=N) so
+// the browser Back button — and returning from a session/workout detail page —
+// restores that athlete's dashboard instead of dumping back to the roster.
+let currentMe = null;
+let _athleteNames = null;  // id -> name, resolved lazily for the viewing bar
+
+async function athleteName(id) {
+  if (!_athleteNames) {
+    const list = await getJSONAuth("/athletes");
+    _athleteNames = new Map(list.map((a) => [a.id, a.name]));
+  }
+  return _athleteNames.get(id);
+}
+
+async function coachViewAthlete(id, name, push) {
+  if (push) history.pushState({ athleteId: id }, "", `?athlete_id=${id}`);
+  document.getElementById("viewingBar").hidden = false;
+  document.getElementById("viewingWho").textContent =
+    "Viewing " + ((name || (await athleteName(id))) ?? "athlete");
+  await loadDashboard(id);
+}
+
+async function coachShowRoster(push) {
+  if (push) history.pushState({}, "", location.pathname);  // drop ?athlete_id
+  document.getElementById("viewingBar").hidden = true;
+  await showRoster();
+}
+
+// Render the view that matches the current URL. Athletes always see their own
+// dashboard; coaches see an athlete when ?athlete_id is set, else the roster.
+async function route() {
+  if (!currentMe) return;
+  if (currentMe.role !== "coach") { await loadDashboard(null); return; }
+  const id = new URLSearchParams(location.search).get("athlete_id");
+  if (id) await coachViewAthlete(Number(id), null, false);
+  else await coachShowRoster(false);
+}
+
 // Signed-in entry point: used by the boot path below and by auth.js right
 // after a sign-in completes (no full page reload — see onSignedIn).
 async function enterApp(me) {
+  currentMe = me;
   document.getElementById("signin").hidden = true;
   renderHeader(me);
   document.getElementById("appView").hidden = false;
   document.getElementById("backToRoster").onclick = (e) => {
     e.preventDefault();
-    document.getElementById("viewingBar").hidden = true;
-    showRoster().catch(console.error);
+    coachShowRoster(true).catch(console.error);
   };
-  if (me.role === "coach") await showRoster();
-  else await loadDashboard(null);
+  await route();
 }
+
+// Back/forward between roster and an athlete (same-document pushState entries).
+window.addEventListener("popstate", () => route().catch(console.error));
 
 // Called by auth.js with the athlete returned by the token exchange.
 function onSignedIn(athlete) {
