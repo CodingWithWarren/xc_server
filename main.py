@@ -815,6 +815,32 @@ def get_session_route(session_id: int,
     return _route_to_detail(db.get(RouteTrack, best.client_route_id))
 
 
+# --- Data reset (dev convenience — see docs/SERVER_SCHEMA.md "Data reset") ----
+
+# Every athlete_id-keyed table, wiped wholesale by DELETE /me/data. No
+# cross-table FKs, so order is cosmetic (derived rows first for readability).
+_ATHLETE_DATA_MODELS = [
+    DetectedSession, Workout, RouteTrack,
+    HeartRateSample, IntervalSample, Sync,
+]
+
+
+@app.delete("/me/data")
+def delete_my_data(current: Athlete = Depends(get_current_athlete),
+                   db: Session = Depends(get_db)):
+    """Delete everything the authenticated athlete has uploaded: raw sample
+    streams, workouts, detected sessions, route tracks, and sync rows. Scoped
+    to the token's athlete only — it can never touch another athlete's rows.
+    Backs the app's debug "Reset (wipe server + start over)" button. It's a dev
+    convenience; consider gating on DEV_MODE before any real deployment."""
+    deleted: dict[str, int] = {}
+    for model in _ATHLETE_DATA_MODELS:
+        result = db.execute(delete(model).where(model.athlete_id == current.id))
+        deleted[model.__tablename__] = result.rowcount
+    db.commit()
+    return {"deleted": deleted}
+
+
 class NoCacheStaticFiles(StaticFiles):
     """Serve static files with Cache-Control: no-cache so browsers always
     revalidate (via ETag) instead of silently serving a stale cached copy —
