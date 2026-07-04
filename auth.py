@@ -78,8 +78,11 @@ def verify_google_id_token(token: str) -> dict:
     try:
         # audience=None skips the lib's single-audience check; we accept any of
         # our client IDs (web + Android) and enforce membership ourselves below.
+        # Allow a small clock skew (tokens live ~1h); a few seconds of drift
+        # between us and Google's issuer otherwise throws "Token used too early".
         claims = google_id_token.verify_oauth2_token(
-            token, google_requests.Request(), audience=None)
+            token, google_requests.Request(), audience=None,
+            clock_skew_in_seconds=10)
     except ValueError as e:
         raise HTTPException(status_code=401, detail=f"Invalid Google token: {e}")
     if claims.get("aud") not in GOOGLE_CLIENT_IDS:
