@@ -77,7 +77,8 @@ def verify_google_id_token(token: str) -> dict:
             detail="Google sign-in not configured: set GOOGLE_CLIENT_IDS in .env")
     try:
         # audience=None skips the lib's single-audience check; we accept any of
-        # our client IDs (web + Android) and enforce membership ourselves below.
+        # our client IDs (web + Android + iOS — each platform's SDK stamps a
+        # different aud) and enforce membership ourselves below.
         # Allow a small clock skew (tokens live ~1h); a few seconds of drift
         # between us and Google's issuer otherwise throws "Token used too early".
         claims = google_id_token.verify_oauth2_token(

@@ -73,7 +73,9 @@ coaches (`athletes.role = "coach"`) may read anyone. Promote a coach manually:
 **.env contract** (gitignored; `.env.example` is the template): `JWT_SECRET`
 (64 hex — regenerating it logs everyone out; it must NOT be generated at
 startup or sessions die on restart), `DEV_MODE`, `GOOGLE_CLIENT_IDS`
-(comma-separated web + Android client IDs).
+(comma-separated allow-list of the project's OAuth client IDs — web, Android,
+and iOS; each platform's Google SDK stamps a different `aud`, so all must be
+accepted. Web stays first: `/auth/config` serves `[0]` to the dashboard).
 
 **DEV_MODE.** When true, `POST /auth/dev-login` exists (`{athlete_id}` or
 `{email}` — unknown email creates a fresh athlete) and the dashboard shows a
