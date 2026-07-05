@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, load_only
 
@@ -813,6 +813,33 @@ def get_session_route(session_id: int,
     best = max(candidates, key=lambda c:
                min(session.end_time, c.end_time) - max(session.start_time, c.start_time))
     return _route_to_detail(db.get(RouteTrack, best.client_route_id))
+
+
+# --- Sync watermark (see docs/SERVER_SCHEMA.md "Sync watermark") --------------
+
+@app.get("/me/last-sample-time")
+def last_sample_time(current: Athlete = Depends(get_current_athlete),
+                     db: Session = Depends(get_db)):
+    """Newest sample timestamp stored for the authenticated athlete, across every
+    ingested table (workouts, heart rate, interval samples). The client fetches
+    this before a sync and re-queries from it, so a reinstall or second device
+    resumes where the athlete's data actually ends. `null` when we hold no data
+    (first sync, or right after DELETE /me/data). It's the max of *end*
+    timestamps (workout/interval end_time, HR sample time) — the same quantity
+    the client used to track locally."""
+    newest = max(
+        (t for t in (
+            db.scalar(select(func.max(Workout.end_time))
+                      .where(Workout.athlete_id == current.id)),
+            db.scalar(select(func.max(HeartRateSample.time))
+                      .where(HeartRateSample.athlete_id == current.id)),
+            db.scalar(select(func.max(IntervalSample.end_time))
+                      .where(IntervalSample.athlete_id == current.id)),
+        ) if t is not None),
+        default=None)
+    # Stored times are naive UTC; stamp Z so the mobile client doesn't misread
+    # a zoneless timestamp as local time.
+    return {"last_sample_time": newest.isoformat() + "Z" if newest else None}
 
 
 # --- Data reset (dev convenience — see docs/SERVER_SCHEMA.md "Data reset") ----
