@@ -817,16 +817,23 @@ def get_session_route(session_id: int,
 
 # --- Sync watermark (see docs/SERVER_SCHEMA.md "Sync watermark") --------------
 
+# Where a first sync (or a post-DELETE /me/data re-sync) starts uploading from:
+# the beginning of summer training. Served as the watermark when an athlete has
+# no data, so the client backfills the whole season instead of just 24 hours.
+SEASON_START = datetime(2026, 7, 6)
+
+
 @app.get("/me/last-sample-time")
 def last_sample_time(current: Athlete = Depends(get_current_athlete),
                      db: Session = Depends(get_db)):
     """Newest sample timestamp stored for the authenticated athlete, across every
     ingested table (workouts, heart rate, interval samples). The client fetches
     this before a sync and re-queries from it, so a reinstall or second device
-    resumes where the athlete's data actually ends. `null` when we hold no data
-    (first sync, or right after DELETE /me/data). It's the max of *end*
-    timestamps (workout/interval end_time, HR sample time) — the same quantity
-    the client used to track locally."""
+    resumes where the athlete's data actually ends. When we hold no data (first
+    sync, or right after DELETE /me/data) it's SEASON_START, so the client
+    uploads the whole season. Otherwise it's the max of *end* timestamps
+    (workout/interval end_time, HR sample time) — the same quantity the client
+    used to track locally."""
     newest = max(
         (t for t in (
             db.scalar(select(func.max(Workout.end_time))
@@ -836,10 +843,10 @@ def last_sample_time(current: Athlete = Depends(get_current_athlete),
             db.scalar(select(func.max(IntervalSample.end_time))
                       .where(IntervalSample.athlete_id == current.id)),
         ) if t is not None),
-        default=None)
+        default=SEASON_START)
     # Stored times are naive UTC; stamp Z so the mobile client doesn't misread
     # a zoneless timestamp as local time.
-    return {"last_sample_time": newest.isoformat() + "Z" if newest else None}
+    return {"last_sample_time": newest.isoformat() + "Z"}
 
 
 # --- Data reset (dev convenience — see docs/SERVER_SCHEMA.md "Data reset") ----
