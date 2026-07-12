@@ -1,11 +1,11 @@
-# CLAUDE.md — XC Training Data Server
+# CLAUDE.md — Chadwick XC Training App Server
 
 Guidance for working in this repo. See `README.md` for setup/run and
 `docs/SERVER_SCHEMA.md` for the authoritative upload wire format.
 
 ## What this is
 
-FastAPI + SQLAlchemy + SQLite backend for the XC Training Data mobile app. The
+FastAPI + SQLAlchemy + SQLite backend for the Chadwick XC Training mobile app. The
 app uploads raw Health Connect data; this server stores it and serves a small
 dashboard. Beginner-owned project — favor simple, explained code over cleverness.
 

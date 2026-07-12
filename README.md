@@ -1,6 +1,6 @@
-# XC Training Data — Server
+# Chadwick XC Training App - Server
 
-The analysis backend for the **XC Training Data** project. A FastAPI server that
+The analysis backend for the **Chadwick XC Training App**. A FastAPI server that
 ingests health/workout data uploaded by the companion mobile app (Android, via
 Health Connect), stores it in SQLite, and serves a small web dashboard.
 
