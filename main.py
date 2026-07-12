@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import delete, func, select
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, load_only
 
@@ -439,6 +439,35 @@ def _ensure_route_session(db: Session, athlete_id: int, route: RouteTrack) -> No
     _write_detected_session(db, athlete_id, rs, workouts, sliced)
 
 
+# Same threshold as the app's display rescue: an untyped (OTHER) workout with a
+# GPS route averaging over 3.5 mph shows as RUNNING. Distinct from detection.py's
+# RUN_SPEED_MPS (run-vs-walk split for route sessions); this one only rescues
+# workouts Fitbit exported without a type.
+UNTYPED_RUN_MIN_MPH = 3.5
+_MPS_PER_MPH = 0.44704
+
+
+def _is_untyped_run(distance_meters, duration_seconds) -> bool:
+    """Average-speed half of the untyped-run rescue (route presence is checked
+    separately). False when distance or duration is missing, like the app."""
+    if not distance_meters or not duration_seconds:
+        return False
+    return distance_meters / duration_seconds / _MPS_PER_MPH > UNTYPED_RUN_MIN_MPH
+
+
+def _workout_has_route(db: Session, aid: int, source_uuid: str,
+                       start, end) -> bool:
+    """Does any of the athlete's routes belong to this workout — linked by
+    source_workout_uuid, or overlapping its time window (pre-backfill uploads)?"""
+    return db.scalar(
+        select(RouteTrack.client_route_id)
+        .where(RouteTrack.athlete_id == aid,
+               or_(RouteTrack.source_workout_uuid == source_uuid,
+                   and_(RouteTrack.start_time < end,
+                        RouteTrack.end_time > start)))
+        .limit(1)) is not None
+
+
 @app.post("/workouts", status_code=201)
 def ingest_sync(payload: schemas.HealthSync,
                 current: Athlete = Depends(get_current_athlete),
@@ -491,6 +520,19 @@ def ingest_sync(payload: schemas.HealthSync,
             "uploaded_at": parse_utc(payload.uploaded_at),
             "client_version": payload.client_version,
         }
+
+    # Fitbit exports auto-detected runs as OTHER. Mirror the app's display rule
+    # server-side (xc_training_app lib/main.dart, _HcRun.activityType): an
+    # untyped workout with a GPS route averaging over 3.5 mph is a run. The
+    # original type stays in the sync row's raw_payload. Detection below reads
+    # the upserted rows, so matched sessions inherit the rescued type.
+    for row in rows_by_uuid.values():
+        if (row["activity_type"] == "OTHER"
+                and _is_untyped_run(row["total_distance_meters"],
+                                    row["duration_seconds"])
+                and _workout_has_route(db, aid, row["source_uuid"],
+                                       row["start_time"], row["end_time"])):
+            row["activity_type"] = "RUNNING"
 
     rows = list(rows_by_uuid.values())
     if rows:
@@ -750,6 +792,21 @@ def ingest_route(payload: schemas.RouteTrack,
     # by the upsert guard above; only build a session for our own row.)
     route = db.get(RouteTrack, crid)
     if route is not None and route.athlete_id == aid:
+        # The route often lands after its workout: re-run the untyped-run rescue
+        # for OTHER workouts this route belongs to, before the session is built,
+        # so the new session inherits the rescued type.
+        for w in db.scalars(select(Workout).where(
+                Workout.athlete_id == aid, Workout.activity_type == "OTHER",
+                or_(Workout.source_uuid == route.source_workout_uuid,
+                    and_(Workout.start_time < route.end_time,
+                         Workout.end_time > route.start_time)))):
+            if _is_untyped_run(w.total_distance_meters, w.duration_seconds):
+                w.activity_type = "RUNNING"
+                # Sessions already matched to this workout carry a stale type.
+                db.execute(update(DetectedSession)
+                           .where(DetectedSession.athlete_id == aid,
+                                  DetectedSession.matched_workout_uuid == w.source_uuid)
+                           .values(matched_activity_type="RUNNING"))
         _ensure_route_session(db, aid, route)
         db.commit()
     return {"client_route_id": crid, "received_points": len(payload.points)}
