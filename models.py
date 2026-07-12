@@ -158,7 +158,10 @@ class RouteTrack(Base):
     # the same id and upsert this row (lets the client retry a flaky upload).
     client_route_id: Mapped[str] = mapped_column(String, primary_key=True)
     athlete_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
-    source: Mapped[str] = mapped_column(String, nullable=False)  # "diy_gps"
+    source: Mapped[str] = mapped_column(String, nullable=False)  # "diy_gps" | "health_connect"
+    # The parent workout this route belongs to (workouts.source_uuid), when the
+    # client knows it. Preferred over time-overlap when attaching the map.
+    source_workout_uuid: Mapped[str | None] = mapped_column(String, nullable=True)
     start_time: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     end_time: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False)

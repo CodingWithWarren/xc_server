@@ -719,6 +719,7 @@ def ingest_route(payload: schemas.RouteTrack,
         "client_route_id": crid,
         "athlete_id": aid,
         "source": payload.source,
+        "source_workout_uuid": payload.source_workout_uuid,
         "start_time": parse_utc(payload.start_time),
         "end_time": parse_utc(payload.end_time),
         "duration_seconds": payload.duration_seconds,
@@ -731,8 +732,9 @@ def ingest_route(payload: schemas.RouteTrack,
     stmt = stmt.on_conflict_do_update(
         index_elements=[RouteTrack.client_route_id],
         set_={c: row[c] for c in (
-            "athlete_id", "source", "start_time", "end_time", "duration_seconds",
-            "distance_meters", "point_count", "uploaded_at", "raw_payload")},
+            "athlete_id", "source", "source_workout_uuid", "start_time",
+            "end_time", "duration_seconds", "distance_meters", "point_count",
+            "uploaded_at", "raw_payload")},
         # client_route_id is client-supplied and a global key, so without this an
         # athlete could overwrite another's route by reusing its id. Only update
         # a row we already own; a conflicting foreign row is left untouched.
@@ -800,6 +802,16 @@ def get_session_route(session_id: int,
     session = db.get(DetectedSession, session_id)
     if session is None or (current.role != "coach" and session.athlete_id != current.id):
         raise HTTPException(status_code=404, detail="Session not found")
+    # Prefer the explicit link: a route that names this session's workout as its
+    # parent (source_workout_uuid). Time overlap below is only the fallback for
+    # routes uploaded without it (e.g. early iOS uploads, DIY recordings).
+    if session.matched_workout_uuid:
+        linked = db.scalar(
+            select(RouteTrack)
+            .where(RouteTrack.athlete_id == session.athlete_id,
+                   RouteTrack.source_workout_uuid == session.matched_workout_uuid))
+        if linked is not None:
+            return _route_to_detail(linked)
     # Find overlapping routes by window only (no raw_payload), pick the one with
     # the most temporal overlap, then load just that one row's GPS points — so we
     # neither scan every route's payload nor return an arbitrary overlap.

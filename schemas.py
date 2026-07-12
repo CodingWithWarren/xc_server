@@ -64,7 +64,11 @@ class RouteTrack(BaseModel):
     # The client doesn't send this yet; until it does, the server synthesizes a
     # stable key from (athlete_id, start_time). See doc "Route tracks > Dedup".
     client_route_id: str | None = None
-    source: str           # "diy_gps"
+    source: str           # "diy_gps" | "health_connect"
+    # health_connect routes: the parent workout's uuid (joins workouts.source_uuid).
+    # Often null on early iOS uploads; the client re-sends the track to backfill
+    # it, which the upsert in POST /routes absorbs.
+    source_workout_uuid: str | None = None
     client_version: str | None = None
     recorded_at: datetime
     start_time: datetime
