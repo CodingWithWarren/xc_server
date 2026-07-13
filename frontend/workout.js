@@ -11,7 +11,7 @@ function toDate(iso) {
   return new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(iso) ? iso : iso + "Z");
 }
 
-const fmtKm = (m) => (m == null ? "—" : (m / 1000).toFixed(2) + " km");
+const fmtMi = (m) => (m == null ? "—" : (m / 1609.344).toFixed(2) + " mi");
 const fmtBpm = (b) => (b == null ? "—" : b + " bpm");
 
 function fmtDateTime(iso) {
@@ -63,7 +63,7 @@ function renderHeader(w, raw) {
     <p class="detail-sub">${sub}</p>
     <div class="stats">
       ${stat("Duration", fmtDuration(w.duration_seconds))}
-      ${stat("Distance", fmtKm(w.total_distance_meters))}
+      ${stat("Distance", fmtMi(w.total_distance_meters))}
       ${stat("Avg HR", fmtBpm(w.avg_heart_rate))}
       ${stat("Max HR", fmtBpm(w.max_heart_rate))}
       ${stat("Calories", w.total_energy_kcal == null ? "—" : w.total_energy_kcal + " kcal")}

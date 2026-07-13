@@ -11,7 +11,7 @@ function toDate(iso) {
   return new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(iso) ? iso : iso + "Z");
 }
 
-const fmtKm = (m) => (m == null ? "—" : (m / 1000).toFixed(2) + " km");
+const fmtMi = (m) => (m == null ? "—" : (m / 1609.344).toFixed(2) + " mi");
 const fmtBpm = (b) => (b == null ? "—" : b + " bpm");
 
 function fmtDateTime(iso) {
@@ -53,7 +53,7 @@ function renderHeader(s) {
     <p class="detail-sub">${fmtDateTime(s.start_time)} · detection ${escapeHtml(s.detection_version)}</p>
     <div class="stats">
       ${stat("Duration", fmtDuration(s.duration_seconds))}
-      ${stat("Distance", fmtKm(s.total_distance_meters))}
+      ${stat("Distance", fmtMi(s.total_distance_meters))}
       ${stat("Avg HR", fmtBpm(s.avg_hr))}
       ${stat("Peak HR", fmtBpm(s.peak_hr))}
       ${stat("Steps", s.total_steps == null ? "—" : s.total_steps.toLocaleString())}
@@ -164,7 +164,7 @@ function renderRouteMap(route) {
   fitBtn.onclick = fitWholeRoute;
 
   document.getElementById("routeMeta").textContent =
-    `${fmtKm(route.distance_meters)} · ${route.point_count.toLocaleString()} GPS points`;
+    `${fmtMi(route.distance_meters)} · ${route.point_count.toLocaleString()} GPS points`;
 }
 
 function renderSampleChips(raw) {
