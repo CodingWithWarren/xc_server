@@ -10,7 +10,7 @@ function toDate(iso) {
   return new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(iso) ? iso : iso + "Z");
 }
 
-const fmtKm = (m) => (m == null ? "—" : (m / 1000).toFixed(2) + " km");
+const fmtMi = (m) => (m == null ? "—" : (m / 1609.344).toFixed(2) + " mi");
 const fmtHr = (bpm) => (bpm == null ? "—" : bpm + " bpm");
 
 function fmtDate(iso) {
@@ -51,7 +51,7 @@ function renderSummary(s) {
     "week of " + start.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 
   document.getElementById("wkDistance").textContent =
-    (tw.total_distance_meters / 1000).toFixed(1) + " km";
+    (tw.total_distance_meters / 1609.344).toFixed(1) + " mi";
   document.getElementById("wkTime").textContent =
     fmtTotalTime(tw.total_duration_seconds);
   document.getElementById("wkRuns").textContent = tw.run_count;
@@ -65,7 +65,7 @@ function renderSummary(s) {
 
   const dDist = tw.total_distance_meters - lw.total_distance_meters;
   setDelta("wkDistanceDelta", dDist,
-    `${dDist >= 0 ? "+" : "−"}${Math.abs(dDist / 1000).toFixed(1)} km vs last week`);
+    `${dDist >= 0 ? "+" : "−"}${Math.abs(dDist / 1609.344).toFixed(1)} mi vs last week`);
 
   const dTime = tw.total_duration_seconds - lw.total_duration_seconds;
   setDelta("wkTimeDelta", dTime,
@@ -121,7 +121,7 @@ function renderRecent(items) {
       <td>${fmtDate(it.date)}</td>
       <td>${escapeHtml(it.type)}</td>
       <td class="num">${it.duration == null ? "—" : fmtDuration(it.duration)}</td>
-      <td class="num">${fmtKm(it.distance)}</td>
+      <td class="num">${fmtMi(it.distance)}</td>
       <td class="num">${fmtHr(it.avgHr)}</td>
       <td><span class="badge badge-${it.badge}">${it.badge}</span></td>
     </tr>`).join("");
@@ -146,8 +146,8 @@ function renderWeeklyChart(weeks) {
     data: {
       labels: weeks.map((w) => w.week_start),
       datasets: [{
-        label: "Distance (km)",
-        data: weeks.map((w) => +(w.total_distance_meters / 1000).toFixed(2)),
+        label: "Distance (mi)",
+        data: weeks.map((w) => +(w.total_distance_meters / 1609.344).toFixed(2)),
         borderColor: "#2f6fed",
         backgroundColor: "rgba(47, 111, 237, 0.10)",
         fill: true,
@@ -158,7 +158,7 @@ function renderWeeklyChart(weeks) {
     options: {
       responsive: true,
       plugins: { legend: { display: false } },
-      scales: { y: { beginAtZero: true, title: { display: true, text: "km" } } },
+      scales: { y: { beginAtZero: true, title: { display: true, text: "mi" } } },
     },
   });
 }
