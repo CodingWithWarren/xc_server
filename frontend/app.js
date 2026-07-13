@@ -198,21 +198,89 @@ async function loadDashboard(athleteId) {
   }
 }
 
+// ---- Coach board (Team Week) ---------------------------------------------
+
+let boardWeekStart = null;  // ISO Monday currently shown; null = this week
+
+function fmtSyncAge(iso) {
+  if (!iso) return "never";
+  const mins = Math.floor((Date.now() - toDate(iso)) / 60000);
+  if (mins < 60) return `${Math.max(mins, 1)}m ago`;
+  if (mins < 48 * 60) return `${Math.round(mins / 60)}h ago`;
+  if (mins < 14 * 24 * 60) return `${Math.round(mins / 1440)}d ago`;
+  return fmtDate(iso);
+}
+
+function boardDayCell(day, dateIso, todayIso) {
+  const cls = { trained: "rec", none: "none", nosync: "nosync", future: "future" }[day.state];
+  const tip = {
+    trained: () => `${day.miles} mi · ${day.minutes}m` + (day.runs > 1 ? ` · ${day.runs} workouts` : ""),
+    none: () => dateIso === todayIso ? "no activity yet today" : "no activity",
+    nosync: () => "no data — hasn't synced",
+    future: () => null,
+  }[day.state]();
+  const today = dateIso === todayIso ? " today-col" : "";
+  return `<td class="board-day${today}">` +
+    `<span class="mark ${cls}"${tip ? ` data-tip="${tip}"` : ""}></span></td>`;
+}
+
 async function showRoster() {
   document.getElementById("dashView").hidden = true;
   document.getElementById("rosterView").hidden = false;
-  const athletes = await getJSONAuth("/athletes");
-  const tbody = document.querySelector("#rosterTable tbody");
-  if (!athletes.length) {
-    tbody.innerHTML = `<tr><td colspan="4" class="muted">No athletes yet.</td></tr>`;
+  const qs = boardWeekStart ? `?start=${boardWeekStart}` : "";
+  const week = await getJSONAuth("/team/week" + qs);
+  boardWeekStart = week.week_start;
+  // Nothing exists before the season's first week (server clamps regardless).
+  document.getElementById("weekPrev").disabled =
+    week.week_start <= week.season_week_start;
+  // "Today" only does something when we're viewing another week.
+  document.getElementById("weekToday").disabled = week.days.includes(week.today);
+
+  // header: "Jul 6 – 12"
+  const first = toDate(week.days[0] + "T12:00:00Z"), last = toDate(week.days[6] + "T12:00:00Z");
+  const md = (d) => d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: PT });
+  document.getElementById("weekLabel").textContent =
+    `${md(first)} – ${last.toLocaleDateString("en-US", { day: "numeric", timeZone: PT })}`;
+
+  // tiles
+  const t = week.team;
+  const isThisWeek = week.days.includes(week.today);
+  document.getElementById("trainedTodayLabel").textContent =
+    isThisWeek ? "Trained today" : "Trained · that week";
+  document.getElementById("trainedToday").textContent =
+    isThisWeek ? `${t.trained_today} / ${t.total}` : "—";
+  document.getElementById("trainedTodaySub").textContent = "";
+  document.getElementById("teamMiles").textContent = t.week_miles.toFixed(1);
+  const dm = t.week_miles - t.prev_week_miles;
+  setDelta("teamMilesDelta", dm,
+    `${dm >= 0 ? "+" : "−"}${Math.abs(dm).toFixed(1)} mi vs prior week`);
+  document.getElementById("staleCount").textContent = t.stale.length;
+  document.getElementById("staleNames").textContent =
+    t.stale.length ? t.stale.join(" · ") : "everyone reporting";
+  document.getElementById("staleCount").classList.toggle("warn-num", t.stale.length > 0);
+
+  // grid
+  const dayNames = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  document.querySelector("#boardTable thead").innerHTML = "<tr><th>Athlete</th>" +
+    week.days.map((d, i) => {
+      const today = d === week.today ? " today-col" : "";
+      const label = d === week.today ? " · today" : "";
+      return `<th class="board-day${today}">${dayNames[i]}<small>${Number(d.slice(8))}${label}</small></th>`;
+    }).join("") +
+    `<th class="num">Runs</th><th class="num">Mi</th><th>Synced</th></tr>`;
+
+  const tbody = document.querySelector("#boardTable tbody");
+  if (!week.athletes.length) {
+    tbody.innerHTML = `<tr><td colspan="10" class="muted">No athletes yet.</td></tr>`;
     return;
   }
-  tbody.innerHTML = athletes.map((a) => `
+  tbody.innerHTML = week.athletes.map((a) => `
     <tr class="clickable" data-id="${a.id}" data-name="${escapeHtml(a.name)}">
-      <td>${escapeHtml(a.name)}</td>
-      <td>${escapeHtml(a.email || "—")}</td>
-      <td><span class="badge badge-role">${escapeHtml(a.role)}</span></td>
-      <td class="num">${a.grade ?? "—"}</td>
+      <td class="board-who">${escapeHtml(a.name)}</td>
+      ${a.days.map((day, i) => boardDayCell(day, week.days[i], week.today)).join("")}
+      <td class="num">${a.week_runs || "–"}</td>
+      <td class="num">${a.week_runs ? a.week_miles.toFixed(1) : "–"}</td>
+      <td><span class="sync-chip${a.stale ? " stale" : ""}">${fmtSyncAge(a.last_sync)}</span></td>
     </tr>`).join("");
   tbody.querySelectorAll("tr.clickable").forEach((tr) => {
     tr.onclick = () =>
@@ -220,6 +288,19 @@ async function showRoster() {
         .catch(console.error);
   });
 }
+
+function shiftBoardWeek(days) {
+  const d = toDate(boardWeekStart + "T12:00:00Z");
+  d.setUTCDate(d.getUTCDate() + days);
+  boardWeekStart = d.toISOString().slice(0, 10);
+  showRoster().catch(console.error);
+}
+document.getElementById("weekPrev").onclick = () => shiftBoardWeek(-7);
+document.getElementById("weekNext").onclick = () => shiftBoardWeek(7);
+document.getElementById("weekToday").onclick = () => {
+  boardWeekStart = null;  // server defaults to the week containing today
+  showRoster().catch(console.error);
+};
 
 function renderHeader(me) {
   document.getElementById("who").hidden = false;
