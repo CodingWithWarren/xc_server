@@ -233,6 +233,8 @@ async function showRoster() {
   // Nothing exists before the season's first week (server clamps regardless).
   document.getElementById("weekPrev").disabled =
     week.week_start <= week.season_week_start;
+  // "Today" only does something when we're viewing another week.
+  document.getElementById("weekToday").disabled = week.days.includes(week.today);
 
   // header: "Jul 6 – 12"
   const first = toDate(week.days[0] + "T12:00:00Z"), last = toDate(week.days[6] + "T12:00:00Z");
@@ -295,6 +297,10 @@ function shiftBoardWeek(days) {
 }
 document.getElementById("weekPrev").onclick = () => shiftBoardWeek(-7);
 document.getElementById("weekNext").onclick = () => shiftBoardWeek(7);
+document.getElementById("weekToday").onclick = () => {
+  boardWeekStart = null;  // server defaults to the week containing today
+  showRoster().catch(console.error);
+};
 
 function renderHeader(me) {
   document.getElementById("who").hidden = false;
