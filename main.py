@@ -736,6 +736,98 @@ def get_session(session_id: int,
     return session
 
 
+@app.get("/team/week")
+def team_week(start: str | None = None,
+              current: Athlete = Depends(get_current_athlete),
+              db: Session = Depends(get_db)):
+    """Coach board: per athlete, which days of one Pacific week they trained,
+    with week totals and sync recency. Day states distinguish "no activity"
+    (the phone has reported since) from "nosync" (it hasn't — unknown, not
+    rested). `start` is any date in the wanted week; defaults to this week."""
+    if current.role != "coach":
+        raise HTTPException(status_code=403, detail="Coaches only")
+
+    today = datetime.now(timezone.utc).astimezone(PACIFIC).date()
+    anchor = date.fromisoformat(start) if start else today
+    monday = anchor - timedelta(days=anchor.weekday())
+    # Nothing exists before the season; clamp navigation to its first week.
+    season = SEASON_START.date()
+    season_monday = season - timedelta(days=season.weekday())
+    monday = max(monday, season_monday)
+    days = [monday + timedelta(days=i) for i in range(7)]
+    prev_monday = monday - timedelta(days=7)
+
+    def day_start_utc(d: date) -> datetime:
+        return (datetime(d.year, d.month, d.day, tzinfo=PACIFIC)
+                .astimezone(timezone.utc).replace(tzinfo=None))
+
+    last_syncs = dict(db.execute(
+        select(Sync.athlete_id, func.max(Sync.uploaded_at))
+        .group_by(Sync.athlete_id)).all())
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    athletes_out, trained_today, week_miles, prev_week_miles, stale = [], 0, 0.0, 0.0, []
+    for a in db.scalars(select(Athlete).order_by(Athlete.name)).all():
+        per_day = {d: {"runs": 0, "miles": 0.0, "minutes": 0} for d in days}
+        for start_time, dur, dist, _act in _activity_entries(db, a.id):
+            d = _pacific_date(start_time)
+            if d in per_day:
+                per_day[d]["runs"] += 1
+                per_day[d]["miles"] += (dist or 0) / 1609.344
+                per_day[d]["minutes"] += round((dur or 0) / 60)
+            elif prev_monday <= d < monday:
+                prev_week_miles += (dist or 0) / 1609.344
+
+        last_sync = last_syncs.get(a.id)
+        day_states = []
+        for d in days:
+            cell = per_day[d]
+            if cell["runs"]:
+                day_states.append({"state": "trained",
+                                   "runs": cell["runs"],
+                                   "miles": round(cell["miles"], 1),
+                                   "minutes": cell["minutes"]})
+            elif d > today:
+                day_states.append({"state": "future"})
+            else:
+                # A past day is only a true rest day if the phone has reported
+                # since that day ended (today: since it began).
+                covered_from = day_start_utc(d if d == today else d + timedelta(days=1))
+                known = last_sync is not None and last_sync >= covered_from
+                day_states.append({"state": "none" if known else "nosync"})
+
+        runs = sum(c["runs"] for c in per_day.values())
+        miles = sum(c["miles"] for c in per_day.values())
+        week_miles += miles
+        if today in per_day and per_day[today]["runs"]:
+            trained_today += 1
+        is_stale = last_sync is None or (now_utc - last_sync) > timedelta(hours=48)
+        if is_stale:
+            stale.append(a.name)
+        athletes_out.append({
+            "id": a.id, "name": a.name, "role": a.role,
+            "days": day_states,
+            "week_runs": runs, "week_miles": round(miles, 1),
+            "last_sync": last_sync.isoformat() + "Z" if last_sync else None,
+            "stale": is_stale,
+        })
+
+    return {
+        "week_start": monday.isoformat(),
+        "season_week_start": season_monday.isoformat(),
+        "days": [d.isoformat() for d in days],
+        "today": today.isoformat(),
+        "athletes": athletes_out,
+        "team": {
+            "total": len(athletes_out),
+            "trained_today": trained_today,
+            "week_miles": round(week_miles, 1),
+            "prev_week_miles": round(prev_week_miles, 1),
+            "stale": stale,
+        },
+    }
+
+
 @app.get("/athletes", response_model=list[schemas.AthleteOut])
 def list_athletes(current: Athlete = Depends(get_current_athlete),
                   db: Session = Depends(get_db)):

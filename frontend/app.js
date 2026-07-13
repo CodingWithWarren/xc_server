@@ -10,7 +10,7 @@ function toDate(iso) {
   return new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(iso) ? iso : iso + "Z");
 }
 
-const fmtKm = (m) => (m == null ? "—" : (m / 1000).toFixed(2) + " km");
+const fmtMi = (m) => (m == null ? "—" : (m / 1609.344).toFixed(2) + " mi");
 const fmtHr = (bpm) => (bpm == null ? "—" : bpm + " bpm");
 
 function fmtDate(iso) {
@@ -51,7 +51,7 @@ function renderSummary(s) {
     "week of " + start.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 
   document.getElementById("wkDistance").textContent =
-    (tw.total_distance_meters / 1000).toFixed(1) + " km";
+    (tw.total_distance_meters / 1609.344).toFixed(1) + " mi";
   document.getElementById("wkTime").textContent =
     fmtTotalTime(tw.total_duration_seconds);
   document.getElementById("wkRuns").textContent = tw.run_count;
@@ -65,7 +65,7 @@ function renderSummary(s) {
 
   const dDist = tw.total_distance_meters - lw.total_distance_meters;
   setDelta("wkDistanceDelta", dDist,
-    `${dDist >= 0 ? "+" : "−"}${Math.abs(dDist / 1000).toFixed(1)} km vs last week`);
+    `${dDist >= 0 ? "+" : "−"}${Math.abs(dDist / 1609.344).toFixed(1)} mi vs last week`);
 
   const dTime = tw.total_duration_seconds - lw.total_duration_seconds;
   setDelta("wkTimeDelta", dTime,
@@ -121,7 +121,7 @@ function renderRecent(items) {
       <td>${fmtDate(it.date)}</td>
       <td>${escapeHtml(it.type)}</td>
       <td class="num">${it.duration == null ? "—" : fmtDuration(it.duration)}</td>
-      <td class="num">${fmtKm(it.distance)}</td>
+      <td class="num">${fmtMi(it.distance)}</td>
       <td class="num">${fmtHr(it.avgHr)}</td>
       <td><span class="badge badge-${it.badge}">${it.badge}</span></td>
     </tr>`).join("");
@@ -146,8 +146,8 @@ function renderWeeklyChart(weeks) {
     data: {
       labels: weeks.map((w) => w.week_start),
       datasets: [{
-        label: "Distance (km)",
-        data: weeks.map((w) => +(w.total_distance_meters / 1000).toFixed(2)),
+        label: "Distance (mi)",
+        data: weeks.map((w) => +(w.total_distance_meters / 1609.344).toFixed(2)),
         borderColor: "#2f6fed",
         backgroundColor: "rgba(47, 111, 237, 0.10)",
         fill: true,
@@ -158,7 +158,7 @@ function renderWeeklyChart(weeks) {
     options: {
       responsive: true,
       plugins: { legend: { display: false } },
-      scales: { y: { beginAtZero: true, title: { display: true, text: "km" } } },
+      scales: { y: { beginAtZero: true, title: { display: true, text: "mi" } } },
     },
   });
 }
@@ -198,21 +198,87 @@ async function loadDashboard(athleteId) {
   }
 }
 
+// ---- Coach board (Team Week) ---------------------------------------------
+
+let boardWeekStart = null;  // ISO Monday currently shown; null = this week
+
+function fmtSyncAge(iso) {
+  if (!iso) return "never";
+  const mins = Math.floor((Date.now() - toDate(iso)) / 60000);
+  if (mins < 60) return `${Math.max(mins, 1)}m ago`;
+  if (mins < 48 * 60) return `${Math.round(mins / 60)}h ago`;
+  if (mins < 14 * 24 * 60) return `${Math.round(mins / 1440)}d ago`;
+  return fmtDate(iso);
+}
+
+function boardDayCell(day, dateIso, todayIso) {
+  const cls = { trained: "rec", none: "none", nosync: "nosync", future: "future" }[day.state];
+  const tip = {
+    trained: () => `${day.miles} mi · ${day.minutes}m` + (day.runs > 1 ? ` · ${day.runs} workouts` : ""),
+    none: () => dateIso === todayIso ? "no activity yet today" : "no activity",
+    nosync: () => "no data — hasn't synced",
+    future: () => null,
+  }[day.state]();
+  const today = dateIso === todayIso ? " today-col" : "";
+  return `<td class="board-day${today}">` +
+    `<span class="mark ${cls}"${tip ? ` data-tip="${tip}"` : ""}></span></td>`;
+}
+
 async function showRoster() {
   document.getElementById("dashView").hidden = true;
   document.getElementById("rosterView").hidden = false;
-  const athletes = await getJSONAuth("/athletes");
-  const tbody = document.querySelector("#rosterTable tbody");
-  if (!athletes.length) {
-    tbody.innerHTML = `<tr><td colspan="4" class="muted">No athletes yet.</td></tr>`;
+  const qs = boardWeekStart ? `?start=${boardWeekStart}` : "";
+  const week = await getJSONAuth("/team/week" + qs);
+  boardWeekStart = week.week_start;
+  // Nothing exists before the season's first week (server clamps regardless).
+  document.getElementById("weekPrev").disabled =
+    week.week_start <= week.season_week_start;
+
+  // header: "Jul 6 – 12"
+  const first = toDate(week.days[0] + "T12:00:00Z"), last = toDate(week.days[6] + "T12:00:00Z");
+  const md = (d) => d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: PT });
+  document.getElementById("weekLabel").textContent =
+    `${md(first)} – ${last.toLocaleDateString("en-US", { day: "numeric", timeZone: PT })}`;
+
+  // tiles
+  const t = week.team;
+  const isThisWeek = week.days.includes(week.today);
+  document.getElementById("trainedTodayLabel").textContent =
+    isThisWeek ? "Trained today" : "Trained · that week";
+  document.getElementById("trainedToday").textContent =
+    isThisWeek ? `${t.trained_today} / ${t.total}` : "—";
+  document.getElementById("trainedTodaySub").textContent = "";
+  document.getElementById("teamMiles").textContent = t.week_miles.toFixed(1);
+  const dm = t.week_miles - t.prev_week_miles;
+  setDelta("teamMilesDelta", dm,
+    `${dm >= 0 ? "+" : "−"}${Math.abs(dm).toFixed(1)} mi vs prior week`);
+  document.getElementById("staleCount").textContent = t.stale.length;
+  document.getElementById("staleNames").textContent =
+    t.stale.length ? t.stale.join(" · ") : "everyone reporting";
+  document.getElementById("staleCount").classList.toggle("warn-num", t.stale.length > 0);
+
+  // grid
+  const dayNames = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  document.querySelector("#boardTable thead").innerHTML = "<tr><th>Athlete</th>" +
+    week.days.map((d, i) => {
+      const today = d === week.today ? " today-col" : "";
+      const label = d === week.today ? " · today" : "";
+      return `<th class="board-day${today}">${dayNames[i]}<small>${Number(d.slice(8))}${label}</small></th>`;
+    }).join("") +
+    `<th class="num">Runs</th><th class="num">Mi</th><th>Synced</th></tr>`;
+
+  const tbody = document.querySelector("#boardTable tbody");
+  if (!week.athletes.length) {
+    tbody.innerHTML = `<tr><td colspan="10" class="muted">No athletes yet.</td></tr>`;
     return;
   }
-  tbody.innerHTML = athletes.map((a) => `
+  tbody.innerHTML = week.athletes.map((a) => `
     <tr class="clickable" data-id="${a.id}" data-name="${escapeHtml(a.name)}">
-      <td>${escapeHtml(a.name)}</td>
-      <td>${escapeHtml(a.email || "—")}</td>
-      <td><span class="badge badge-role">${escapeHtml(a.role)}</span></td>
-      <td class="num">${a.grade ?? "—"}</td>
+      <td class="board-who">${escapeHtml(a.name)}</td>
+      ${a.days.map((day, i) => boardDayCell(day, week.days[i], week.today)).join("")}
+      <td class="num">${a.week_runs || "–"}</td>
+      <td class="num">${a.week_runs ? a.week_miles.toFixed(1) : "–"}</td>
+      <td><span class="sync-chip${a.stale ? " stale" : ""}">${fmtSyncAge(a.last_sync)}</span></td>
     </tr>`).join("");
   tbody.querySelectorAll("tr.clickable").forEach((tr) => {
     tr.onclick = () =>
@@ -220,6 +286,15 @@ async function showRoster() {
         .catch(console.error);
   });
 }
+
+function shiftBoardWeek(days) {
+  const d = toDate(boardWeekStart + "T12:00:00Z");
+  d.setUTCDate(d.getUTCDate() + days);
+  boardWeekStart = d.toISOString().slice(0, 10);
+  showRoster().catch(console.error);
+}
+document.getElementById("weekPrev").onclick = () => shiftBoardWeek(-7);
+document.getElementById("weekNext").onclick = () => shiftBoardWeek(7);
 
 function renderHeader(me) {
   document.getElementById("who").hidden = false;
