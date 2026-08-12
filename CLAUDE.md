@@ -86,6 +86,107 @@ rollout. Public routes: `/`, static files, `/health`, `/auth/*`, `/docs`.
 **Legacy data:** pre-auth uploads sat under `athlete_id=1`; re-attach with
 `venv/bin/python scripts/link_legacy_data.py --from-id 1 --to-email you@...`.
 
+## Coach email digest
+
+Athletes' home screen shows a summary of the coach's email. Coach mail is
+forwarded into **one shared team mailbox**; the server polls it, summarizes it
+once with Claude, and serves the same digest to every athlete. The app does none
+of this: mailbox credentials and the model API key would be readable by anyone
+who unzips the APK, and one summarization serves the whole team.
+
+- `coach_digest.py` — IMAP polling, HTML flattening, summarization, caching.
+- `models.py` — `CoachMailbox` / `CoachMessage` / `CoachDigest`.
+- Config is env-only (`.env.example`); startup mirrors it into the mailbox row
+  (`sync_team_mailbox_from_env`) with the password encrypted at rest.
+
+**The response shape is a fixed contract — the mobile client is already shipped
+against it.** Both endpoints need `Authorization: Bearer` and are scoped to the
+token's athlete. `digest` may be `null` and `messages` `[]` (the legitimate
+"nothing yet" state). Timestamps go out ISO-8601 with an explicit **Z** — a
+zoneless timestamp makes the app's "Summarized 3h ago" hours wrong — and the
+content type carries `charset=utf-8` (summaries contain em-dashes).
+
+| Endpoint | Behavior |
+|---|---|
+| `GET /coach-digest` | The cached digest. Cheap and side-effect-free — two indexed reads, **never** an IMAP connection or a model call. Called on every app open. |
+| `POST /coach-digest/refresh` | Poll now, re-summarize, return it. Backs the "Re-summarize" button, so it bypasses the skip-if-unchanged check. |
+
+**Status codes carry meaning.** `404`/`501` = "this server doesn't do digests":
+the app hides the card for the rest of the session. That's what an unconfigured
+deployment returns (no `COACH_IMAP_*` → no mailbox row → 501). **Never return
+`200` with an empty digest to mean unsupported** — that renders an empty card
+instead of no card. `401` sends the athlete back to sign-in; any other 4xx/5xx
+shows an error *under* the locally cached digest, so a poll failure is a `502`
+with a useful message, not a silent empty 200.
+
+**Only call the model when the mail actually changed.** `coach_digests.source_ids`
+holds the sorted Message-IDs behind the summary; if the window still holds
+exactly those, skip the model call. Key this on the **`Message-ID` header, never
+the IMAP sequence number** — sequence numbers shift as mail arrives, so keying on
+them re-summarizes (and re-bills) on every poll.
+
+**IMAP gotchas (learned the hard way):**
+- **Fetch with `BODY.PEEK[]`, never `BODY[]`.** `BODY[]` sets `\Seen` and
+  silently marks the coach's mail read in a mailbox a human also reads. The
+  folder is also opened `readonly=True` as a second guard.
+- **`SINCE` is `dd-MMM-yyyy` with English month abbreviations** (`SINCE
+  05-Aug-2026`). Built by hand in `imap_since` — `strftime("%d-%b-%Y")` is
+  locale-aware and a localized month name makes the search silently return
+  nothing.
+- **Gmail needs an App Password *and* IMAP enabled** (and 2FA on before app
+  passwords exist). `AUTHENTICATIONFAILED` is almost always one of those two.
+- **Auto-forwarding preserves the original `From:`; the Forward button does
+  not** — a hand-forwarded mail arrives from the athlete with the real sender
+  only in the quoted `---------- Forwarded message ----------` block. The sender
+  filter matches the header first, then scans the first ~600 body chars.
+
+Budget: 14-day window, 25 messages, 4000 chars per body, poll every ~20 min.
+
+**Summarization goes through OpenRouter** (`_call_model`) — a plain OpenAI-shaped
+HTTPS POST via `requests`, no provider SDK. `COACH_DIGEST_MODELS` is a
+comma-separated list tried in order, and it deliberately mixes tiers: a cheap
+**paid** primary (`deepseek/deepseek-v4-flash-0731`, ~$0.08/M in — pennies a
+month at this volume) with a **`:free`** model behind it. The free entry is the
+safety net for a zero balance (HTTP 402), a throttled endpoint, or a provider
+outage; without it, running out of credit would silently kill the digest instead
+of degrading it. Keep a `:free` entry last. The `:free` suffix is what makes a
+model cost nothing — dropping it starts billing. Model ids are date-pinned so an
+alias can't change behavior under us. Avoid "reasoning" variants; they emit
+their thinking alongside the answer and break the strict-JSON reply. Free models
+come and go — the current list is at
+<https://openrouter.ai/models?max_price=0>.
+
+`COACH_DIGEST_DATA_COLLECTION` (default `deny`) restricts routing to providers
+that don't retain prompts, because the prompt is students' coach email. Blank it
+to route anywhere — more providers, fewer failures, weaker privacy. Verified
+working, but note it can make a model **404 outright** ("no endpoints found
+matching your data policy") when none of its providers qualify; both NVIDIA free
+models did exactly that.
+
+**Thinking is off** (`COACH_DIGEST_REASONING=off` → `reasoning: {"enabled":
+false}`). Learned the hard way: DeepSeek v4 Flash is a reasoning model, and
+`max_tokens` caps **thinking + answer together** — on a long window the thinking
+consumed the whole budget and `content` came back **empty**, which the poller
+correctly read as a failed model and fell through to the free fallback every
+time. Measured on an 8-email prompt: 3.0s / 123 output tokens with thinking off
+versus 9–15s / 850–1070 tokens with it on, for the same JSON. Summarizing email
+is extraction, not a puzzle. If a future model genuinely needs thinking, set it
+to `on` **and** raise `max_tokens` in `_post_completion` well above the thinking
+length, or the empty-content failure comes back.
+
+The summarizer asks for strict JSON and parses defensively (strip a ```json
+fence, take the outermost `{...}`); **an unparsable reply keeps the previous
+digest** rather than overwriting a good summary with nothing. That matters more
+on small free models than it would on a frontier one.
+
+The free tier also has a **daily request cap**, which is the other reason the
+skip-if-unchanged check earns its keep: a quiet inbox costs zero model calls, so
+normal operation is a handful of requests a day, not one per poll.
+
+**The mailbox password must never appear in a response, a log line, or an error
+message.** It's stored Fernet-encrypted (key from `COACH_MAILBOX_KEY`, else
+derived from `JWT_SECRET`); errors name the host, never the credential.
+
 ## Gotchas (learned the hard way)
 
 - **Schema changes need a DB reset.** `Base.metadata.create_all` only creates
@@ -108,7 +209,15 @@ rollout. Public routes: `/`, static files, `/health`, `/auth/*`, `/docs`.
 
 ## Testing
 
-No formal test suite yet. Verify changes by running the server on a scratch port
+`tests/` holds pytest coverage for the coach email digest (fake IMAP + fake model
+— no network, no real DB):
+
+```
+pip install -r requirements-dev.txt
+venv/bin/python -m pytest tests/ -q
+```
+
+The rest of the app has no formal suite yet. Verify changes by running the server on a scratch port
 against a built JSON payload (see how it's done in conversation history): POST a
 sample, then GET the endpoints and assert counts/values. A headless screenshot of
 the dashboard via Windows Chrome confirms the frontend renders.
@@ -153,6 +262,11 @@ bridges adjacent walking), which dilutes a run's average cadence.
   (sleep volume is tiny vs HR); the `stream` column makes it a clean migration.
 - Sign in with Apple (second `auth_identities` provider), refresh tokens +
   shorter access tokens, GPS via Strava OAuth.
+- Per-athlete coach mailboxes. `coach_mailboxes.athlete_id` is already nullable
+  (NULL = the shared team mailbox) and lookup prefers an athlete's own row, so
+  adding them is data, not a migration. Not needed while coach mail is a
+  team-wide broadcast.
+- Showing the digest on the web dashboard — today it's mobile-only.
 
 ## Commits
 

@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
@@ -5,16 +7,18 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, load_only
 
+import coach_digest
 import config
 from auth import (authorize_athlete_access, create_access_token,
                   get_current_athlete, get_or_create_athlete_for_identity,
                   verify_google_id_token)
-from database import Base, engine, get_db
+from database import Base, SessionLocal, engine, get_db
 from detection import (DETECTION_VERSION, detect_sessions, parse_utc,
                        session_from_route)
 from models import (Athlete, DetectedSession, HeartRateSample, IntervalSample,
@@ -43,7 +47,24 @@ def _round_or_none(value: float | None) -> int | None:
 async def lifespan(app: FastAPI):
     # Runs once on startup: create any tables that don't exist yet.
     Base.metadata.create_all(bind=engine)
+
+    # Coach email digest: mirror the .env mailbox config into the DB, then start
+    # the background poller. Both are no-ops when the feature isn't configured,
+    # and the endpoints then answer 501 (see coach_digest).
+    poller = None
+    db = SessionLocal()
+    try:
+        if coach_digest.sync_team_mailbox_from_env(db) is not None:
+            poller = asyncio.create_task(coach_digest.run_poller())
+    finally:
+        db.close()
+
     yield
+
+    if poller is not None:
+        poller.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await poller
 
 
 app = FastAPI(lifespan=lifespan)
@@ -1008,6 +1029,58 @@ def last_sample_time(current: Athlete = Depends(get_current_athlete),
     # Stored times are naive UTC; stamp Z so the mobile client doesn't misread
     # a zoneless timestamp as local time.
     return {"last_sample_time": newest.isoformat() + "Z"}
+
+
+# --- Coach email digest (see CLAUDE.md "Coach email digest") ------------------
+
+class Utf8JSONResponse(JSONResponse):
+    """JSON with an explicit charset, as the mobile client's contract requires.
+    Summaries carry em-dashes and accented names; Starlette already emits real
+    UTF-8 bytes, this just labels them."""
+    media_type = "application/json; charset=utf-8"
+
+
+def _coach_mailbox_or_501(db: Session, athlete_id: int) -> coach_digest.CoachMailbox:
+    """Resolve the athlete's mailbox, or signal "this server doesn't do digests".
+
+    501 (like 404) is the app's feature flag: it hides the card for the rest of
+    the session. Never answer 200-with-an-empty-digest to mean unsupported —
+    that renders an empty card instead of no card."""
+    mailbox = coach_digest.mailbox_for_athlete(db, athlete_id)
+    if mailbox is None:
+        raise HTTPException(
+            status_code=501,
+            detail="This server does not have a coach mailbox configured")
+    return mailbox
+
+
+@app.get("/coach-digest", response_model=schemas.CoachDigestResponse,
+         response_class=Utf8JSONResponse)
+def get_coach_digest(current: Athlete = Depends(get_current_athlete),
+                     db: Session = Depends(get_db)):
+    """The athlete's cached coach-mail digest. Cheap and side-effect-free: two
+    indexed reads, no IMAP connection and no model call — the app hits this on
+    every app open and every pull-to-refresh. Polling happens in the background
+    job and in POST /coach-digest/refresh."""
+    return coach_digest.digest_response(db, _coach_mailbox_or_501(db, current.id))
+
+
+@app.post("/coach-digest/refresh", response_model=schemas.CoachDigestResponse,
+          response_class=Utf8JSONResponse)
+def refresh_coach_digest(current: Athlete = Depends(get_current_athlete),
+                         db: Session = Depends(get_db)):
+    """Poll the mailbox now, re-summarize, and return the fresh result. Backs
+    the app's "Re-summarize" button, so it bypasses the skip-if-unchanged check
+    the background poller relies on. Runs in FastAPI's threadpool (this is a
+    sync def), so the blocking IMAP fetch doesn't stall other requests."""
+    mailbox = _coach_mailbox_or_501(db, current.id)
+    try:
+        coach_digest.poll_mailbox(db, mailbox, force=True)
+    except coach_digest.MailboxError as e:
+        # 502, not 200: the app shows this message under the digest it cached
+        # locally, so a flaky mailbox degrades the card instead of blanking it.
+        raise HTTPException(status_code=502, detail=str(e))
+    return coach_digest.digest_response(db, mailbox)
 
 
 # --- Data reset (dev convenience — see docs/SERVER_SCHEMA.md "Data reset") ----

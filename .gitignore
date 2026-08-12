@@ -14,3 +14,6 @@ __pycache__/
 
 # Schema docs symlinked in from the phone-app repo (symlink, not a real dir)
 docs
+
+# pytest
+.pytest_cache/

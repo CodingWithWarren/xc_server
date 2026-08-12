@@ -5,3 +5,7 @@ google-auth==2.53.0
 PyJWT==2.13.0
 python-dotenv==1.2.2
 requests==2.34.2
+# Coach email digest: encrypting the stored mailbox password at rest. IMAP and
+# email parsing are standard library, and summarization is a plain HTTPS POST to
+# OpenRouter via `requests` above — no provider SDK needed.
+cryptography==46.0.1
