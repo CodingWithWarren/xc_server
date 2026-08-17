@@ -32,7 +32,7 @@ import json
 import logging
 import re
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from datetime import date, datetime, timedelta, timezone
 from email.message import Message
 
@@ -117,6 +117,129 @@ class CoachEmail:
     subject: str
     sent_at: datetime | None
     body: str
+    # Threading headers, used to group a correction with what it corrects.
+    # Default so older call sites (and tests) can build one positionally.
+    in_reply_to: str | None = None
+    references: list[str] = dataclass_field(default_factory=list)
+
+
+# --- Threading: grouping a correction with the message it corrects ------------
+#
+# A coach's follow-up ("actually the bus leaves at 7:00") only helps if the model
+# can tell it supersedes the original. Two things make that work: grouping the
+# messages into threads, and marking the quoted copy of the original that rides
+# along inside a reply as historical rather than current.
+
+_REPLY_PREFIX_RE = re.compile(r"^\s*(?:re|fwd?|fw|aw|sv)\s*(?:\[\d+\])?\s*:\s*",
+                              re.IGNORECASE)
+_MESSAGE_ID_RE = re.compile(r"<[^<>@\s]+@[^<>\s]+>")
+
+
+def has_reply_prefix(subject: str) -> bool:
+    """Does the subject look like a reply/forward ("Re: ...", "Fwd: ...")?"""
+    return bool(_REPLY_PREFIX_RE.match(subject or ""))
+
+
+def normalize_subject(subject: str) -> str:
+    """Strip every leading Re:/Fwd: so a thread's messages compare equal."""
+    text = subject or ""
+    while True:
+        stripped = _REPLY_PREFIX_RE.sub("", text)
+        if stripped == text:
+            break
+        text = stripped
+    return " ".join(text.split()).lower()
+
+
+# A forwarded block IS the content of a forward, so it must never be treated as
+# a stale reply quote — the hand-forward case depends on keeping it.
+_FORWARD_MARKER_RE = re.compile(r"^[ \t]*-{2,}[ \t]*Forwarded message[ \t]*-{2,}",
+                                re.IGNORECASE | re.MULTILINE)
+_REPLY_MARKER_RES = (
+    # "On Mon, 10 Aug 2026 at 09:14, Coach Kim <...> wrote:" — DOTALL because
+    # Gmail wraps this attribution across two lines, and a single-line pattern
+    # then misses it and leaves it sitting in the "new" text.
+    re.compile(r"^[ \t]*On\b.{0,300}?\bwrote:[ \t]*$",
+               re.IGNORECASE | re.MULTILINE | re.DOTALL),
+    re.compile(r"^[ \t]*-{2,}[ \t]*Original Message[ \t]*-{2,}",
+               re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^[ \t]*>", re.MULTILINE),
+)
+
+
+def split_reply_quote(body: str) -> tuple[str, str]:
+    """Split a reply into (what's new, what it quoted).
+
+    The quoted half is the *previous* state of the world — the very thing a
+    correction is overriding — so the prompt labels it instead of letting it sit
+    alongside the new text as if both were current. Returns the whole body as
+    "new" when there's no reply quote, or when the quote is a forwarded block
+    (then it's the content, not history)."""
+    if not body:
+        return "", ""
+    starts = [m.start() for m in
+              (rx.search(body) for rx in _REPLY_MARKER_RES) if m]
+    if not starts:
+        return body, ""
+    cut = min(starts)
+
+    forward = _FORWARD_MARKER_RE.search(body)
+    if forward and forward.start() <= cut:
+        return body, ""          # a forward: the quoted block is the message
+
+    new_text = body[:cut].strip()
+    if not new_text:
+        return body, ""          # nothing but quote — keep it rather than lose it
+    return new_text, body[cut:].strip()
+
+
+def group_threads(emails: list[CoachEmail]) -> list[list[CoachEmail]]:
+    """Group messages into threads, each ordered oldest -> newest.
+
+    Primary signal is the In-Reply-To/References headers. Subject is only a
+    fallback, and only when something in the group actually looks like a reply
+    — otherwise two unrelated emails that share a subject ("Practice update"
+    two weeks apart) would be merged and the older one treated as superseded."""
+    parent = {mail.message_id: mail.message_id for mail in emails}
+
+    def find(node: str) -> str:
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    def union(a: str, b: str) -> None:
+        root_a, root_b = find(a), find(b)
+        if root_a != root_b:
+            parent[root_a] = root_b
+
+    known = set(parent)
+    for mail in emails:
+        for ref in ([mail.in_reply_to] if mail.in_reply_to else []) + list(mail.references):
+            if ref in known:
+                union(mail.message_id, ref)
+
+    by_subject: dict[str, list[CoachEmail]] = {}
+    for mail in emails:
+        by_subject.setdefault(normalize_subject(mail.subject), []).append(mail)
+    for subject, group in by_subject.items():
+        if subject and len(group) > 1 and any(has_reply_prefix(m.subject) for m in group):
+            for mail in group[1:]:
+                union(group[0].message_id, mail.message_id)
+
+    threads: dict[str, list[CoachEmail]] = {}
+    for mail in emails:
+        threads.setdefault(find(mail.message_id), []).append(mail)
+
+    ordered = []
+    for messages in threads.values():
+        messages.sort(key=lambda m: (m.sent_at is None, m.sent_at or datetime.min))
+        ordered.append(messages)
+    # Newest thread first, judged by its most recent message.
+    ordered.sort(
+        key=lambda t: max((m.sent_at for m in t if m.sent_at), default=datetime.min),
+        reverse=True)
+    return ordered
 
 
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -251,6 +374,12 @@ def parse_message(raw: bytes) -> CoachEmail:
         subject=_header(msg, "Subject"),
         sent_at=sent_at,
         body=body,
+        # References is a space-separated chain of the whole thread; In-Reply-To
+        # is just the immediate parent. Both are advisory — plenty of clients
+        # omit them, which is why subject is kept as a fallback.
+        in_reply_to=next(iter(_MESSAGE_ID_RE.findall(_header(msg, "In-Reply-To"))),
+                         None),
+        references=_MESSAGE_ID_RE.findall(_header(msg, "References")),
     )
 
 
@@ -357,6 +486,12 @@ Reply with ONLY a JSON object, no markdown fence and no commentary:
   details, workout assignments, schedule changes. Keep each under 120
   characters. Put concrete dates and times in, and prefer the newest email
   when two emails disagree.
+
+The emails are grouped into conversations. A later reply in a conversation
+UPDATES or CORRECTS the messages above it: when they conflict, report only the
+corrected version and leave the superseded detail out entirely. A reply that
+adds something is additional, not a replacement. Text marked as quoted from an
+earlier message is history — never treat it as new or current.
 - "actions": anything the runner personally has to do (forms, gear, replies,
   arrival times), each with its deadline if one was given. Empty list if the
   emails ask nothing of the runner.
@@ -365,23 +500,66 @@ Be concrete and never invent a detail that is not in the emails. If the emails
 carry no useful information, return an empty headline and empty lists."""
 
 
+# How much of a reply's quoted tail to show. Enough for the model to see what's
+# being corrected, not so much that stale detail crowds out the correction.
+_QUOTED_CHARS = 600
+
+
 def build_prompt(emails: list[CoachEmail], today: date,
                  max_body_chars: int | None = None) -> str:
-    """The user turn: today's date, then each email newest first."""
+    """The user turn: today's date, then the mail grouped into threads.
+
+    Threads are newest-first, but messages WITHIN a thread run oldest -> newest
+    so the last thing the model reads about a topic is the latest word on it.
+    That ordering is what makes a correction land."""
     max_body_chars = (max_body_chars if max_body_chars is not None
                       else config.COACH_MAX_BODY_CHARS)
-    parts = [f"Today's date is {today.isoformat()}.",
-             "", f"Here are the {len(emails)} most recent emails, newest first:"]
-    for mail in emails:
-        parts += [
-            "",
-            "---",
-            f"From: {mail.sender_name} <{mail.sender}>",
-            f"Date: {_iso_z(mail.sent_at) or 'unknown'}",
-            f"Subject: {mail.subject}",
-            "",
-            mail.body[:max_body_chars],
-        ]
+    threads = group_threads(emails)
+
+    parts = [
+        f"Today's date is {today.isoformat()}.",
+        "",
+        f"Here are {len(emails)} email(s), grouped into {len(threads)} "
+        "conversation(s), newest conversation first. Within a conversation the "
+        "messages run oldest to newest, so the LAST message is the most recent "
+        "word on that topic.",
+    ]
+    for index, thread in enumerate(threads, 1):
+        # Title the thread by its earliest subject, minus the Re:/Fwd: noise.
+        title = thread[0].subject or "(no subject)"
+        parts += ["", f"=== Conversation {index}: {title} "
+                      f"({len(thread)} message{'s' if len(thread) != 1 else ''}) ==="]
+        for position, mail in enumerate(thread, 1):
+            new_text, quoted = split_reply_quote(mail.body)
+            header = f"message {position} of {len(thread)}"
+            if position > 1:
+                header += " — LATER REPLY: updates or corrects the message(s) above"
+            parts += [
+                "",
+                f"--- {header} ---",
+                f"From: {mail.sender_name} <{mail.sender}>",
+                f"Date: {_iso_z(mail.sent_at) or 'unknown'}",
+                f"Subject: {mail.subject}",
+                "",
+                new_text[:max_body_chars],
+            ]
+            if quoted and position == 1:
+                # Only worth showing when the quoted material isn't otherwise in
+                # the prompt. If earlier messages of this thread are printed
+                # above (position > 1), the quote is a verbatim copy of them —
+                # keeping it just gives the model a second, STALE statement of
+                # the fact the reply is correcting, and it sometimes picks that
+                # one. Measured on real mail: dropping it is what makes a
+                # terse correction ("Media Day is the 25th!") win reliably.
+                parts += [
+                    "",
+                    "[text quoted from an earlier message — historical context "
+                    "only; do not treat it as new or current information]",
+                    quoted[:_QUOTED_CHARS],
+                ]
+            elif quoted:
+                parts += ["", "[the quoted copy of the earlier message(s) is "
+                              "omitted — they appear in full above]"]
     return "\n".join(parts)
 
 
@@ -440,7 +618,9 @@ def _post_completion(model: str, system: str, prompt: str) -> str:
         "model": model,
         # Low temperature: this is extraction, not creative writing.
         "temperature": 0.2,
-        "max_tokens": 900,
+        # Must leave room for reasoning tokens even though we asked for none —
+        # some providers ignore reasoning.enabled=false (see config).
+        "max_tokens": config.COACH_DIGEST_MAX_TOKENS,
         "messages": [{"role": "system", "content": system},
                      {"role": "user", "content": prompt}],
     }
@@ -449,11 +629,18 @@ def _post_completion(model: str, system: str, prompt: str) -> str:
         # the answer, so a long window can spend the whole budget thinking and
         # return empty content (which we'd then treat as a failed model).
         body["reasoning"] = {"enabled": False}
+    provider: dict = {}
     if config.COACH_DIGEST_DATA_COLLECTION:
         # Route only to providers matching this data-retention policy. The
         # prompt is students' coach email, so "deny" (providers that don't
         # collect prompts) is the default.
-        body["provider"] = {"data_collection": config.COACH_DIGEST_DATA_COLLECTION}
+        provider["data_collection"] = config.COACH_DIGEST_DATA_COLLECTION
+    if config.COACH_DIGEST_IGNORE_PROVIDERS:
+        # Some providers ignore reasoning.enabled=false and think anyway, which
+        # returns empty content (see config).
+        provider["ignore"] = config.COACH_DIGEST_IGNORE_PROVIDERS
+    if provider:
+        body["provider"] = provider
 
     try:
         response = requests.post(

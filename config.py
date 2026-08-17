@@ -89,12 +89,32 @@ COACH_DIGEST_TIMEOUT_SECONDS = int(
 # tokens with it on, for the same JSON. Set to "on" if a future model needs it.
 COACH_DIGEST_REASONING = os.getenv("COACH_DIGEST_REASONING", "off").strip().lower()
 
+# ...but the flag above is only a REQUEST, and not every OpenRouter provider
+# honors it: AtlasCloud served deepseek-v4-flash with ~3,900 chars of reasoning
+# despite reasoning.enabled=false, which burned all 900 tokens and returned
+# empty content on 2 of 3 tries. So the ceiling has to leave room for thinking
+# we asked not to happen. ~3k covers the observed reasoning plus the answer;
+# the extra output tokens cost fractions of a cent.
+COACH_DIGEST_MAX_TOKENS = int(
+    os.getenv("COACH_DIGEST_MAX_TOKENS", "3000").strip() or 3000)
+
 # OpenRouter routes each request to one of many providers, whose data-retention
 # policies differ. "deny" restricts routing to providers that don't collect
 # prompts — the safer default when the prompt is students' coach email. Set it
 # blank to let OpenRouter route anywhere (more providers, so fewer failures).
 COACH_DIGEST_DATA_COLLECTION = os.getenv(
     "COACH_DIGEST_DATA_COLLECTION", "deny").strip().lower()
+
+# Providers to route around. AtlasCloud ignores reasoning.enabled=false on
+# deepseek-v4-flash and thinks anyway — up to 12,000 characters of it, which no
+# max_tokens ceiling can absorb, leaving `content` empty. Measured on the real
+# digest prompt: 2/4 replies usable with it in the pool, 4/5 with it excluded
+# (and reasoning tokens dropped to zero). `require_parameters` does NOT help —
+# it advertises support for the flag and then ignores it.
+COACH_DIGEST_IGNORE_PROVIDERS = [
+    p.strip() for p in
+    os.getenv("COACH_DIGEST_IGNORE_PROVIDERS", "AtlasCloud").split(",") if p.strip()
+]
 
 # Background poll cadence. Every poll is an IMAP fetch; the model is only called
 # when the set of Message-IDs in the window actually changed.

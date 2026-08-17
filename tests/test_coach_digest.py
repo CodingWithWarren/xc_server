@@ -502,6 +502,154 @@ def test_parse_model_reply_handles_fences_and_junk():
             "headline": "", "bullets": [], "actions": []}
 
 
+# --- Replies, corrections, and threading ---------------------------------------
+
+def mail(mid, subject, body, day, *, in_reply_to=None, references=()):
+    return coach_digest.CoachEmail(
+        mid, "coach@school.edu", "Coach Kim", subject,
+        datetime(2026, 8, day, 12, 0), body,
+        in_reply_to=in_reply_to, references=list(references))
+
+
+def test_reply_is_threaded_with_the_message_it_answers():
+    original = mail("<a@mail>", "Saturday meet", "Bus leaves at 7:15.", 9)
+    reply = mail("<b@mail>", "Re: Saturday meet", "Correction: bus at 7:00.", 10,
+                 in_reply_to="<a@mail>")
+
+    threads = coach_digest.group_threads([reply, original])
+
+    assert len(threads) == 1
+    # Oldest first, so the correction is the last thing read.
+    assert [m.message_id for m in threads[0]] == ["<a@mail>", "<b@mail>"]
+
+
+def test_threading_also_works_off_the_references_chain():
+    a = mail("<a@mail>", "Meet", "original", 9)
+    b = mail("<b@mail>", "Re: Meet", "reply", 10, references=["<a@mail>"])
+    c = mail("<c@mail>", "Re: Meet", "reply 2", 11,
+             references=["<a@mail>", "<b@mail>"])
+
+    threads = coach_digest.group_threads([c, a, b])
+
+    assert len(threads) == 1
+    assert [m.message_id for m in threads[0]] == ["<a@mail>", "<b@mail>", "<c@mail>"]
+
+
+def test_subject_groups_a_reply_that_lost_its_headers():
+    """Forwarding strips In-Reply-To often enough that subject has to work."""
+    original = mail("<a@mail>", "Saturday meet", "Bus at 7:15.", 9)
+    reply = mail("<b@mail>", "Re: Saturday meet", "Bus at 7:00 actually.", 10)
+
+    threads = coach_digest.group_threads([reply, original])
+
+    assert len(threads) == 1
+    assert [m.message_id for m in threads[0]] == ["<a@mail>", "<b@mail>"]
+
+
+def test_same_subject_without_a_reply_marker_is_not_merged():
+    """Two unrelated "Practice update" emails must not be threaded, or the older
+    one gets treated as superseded and its content silently dropped."""
+    first = mail("<a@mail>", "Practice update", "Monday: 5 miles.", 3)
+    second = mail("<b@mail>", "Practice update", "Tuesday: track.", 10)
+
+    threads = coach_digest.group_threads([second, first])
+
+    assert len(threads) == 2
+
+
+def test_threads_are_ordered_newest_conversation_first():
+    old = mail("<old@mail>", "Uniforms", "pickup Friday", 2)
+    new = mail("<new@mail>", "Meet", "9am start", 12)
+
+    threads = coach_digest.group_threads([old, new])
+
+    assert [t[0].message_id for t in threads] == ["<new@mail>", "<old@mail>"]
+
+
+def test_reply_quote_is_split_off_from_the_new_text():
+    body = ("Correction: the bus leaves at 7:00, not 7:15.\n\n"
+            "On Mon, 10 Aug 2026 at 09:14, Coach Kim <coach@school.edu> wrote:\n"
+            "> Bus leaves at 7:15 sharp.\n> Bring both pairs of shoes.\n")
+
+    new_text, quoted = coach_digest.split_reply_quote(body)
+
+    assert new_text == "Correction: the bus leaves at 7:00, not 7:15."
+    # The quoted original is kept, but out of the new text: nothing from the
+    # quote leaks in, and the "On ... wrote:" attribution line goes with it.
+    assert "Bring both pairs of shoes." in quoted
+    assert "Bring both pairs of shoes." not in new_text
+    assert "wrote:" not in new_text
+
+
+def test_a_wrapped_attribution_line_is_still_recognised():
+    """Gmail wraps "On <date>, <name> <addr>\\nwrote:" across two lines; a
+    single-line pattern misses it and leaves it in the new text."""
+    body = ("Sorry! Media Day is the 25th!\n\n"
+            "On Sun, Aug 16, 2026 at 10:47 AM George Ramos <gramos@school.edu>\n"
+            "wrote:\n\n> Media Day is Tuesday the 18th.\n")
+
+    new_text, quoted = coach_digest.split_reply_quote(body)
+
+    assert new_text == "Sorry! Media Day is the 25th!"
+    assert "wrote:" not in new_text
+    assert "18th" in quoted
+
+
+def test_a_forwarded_block_is_content_not_a_stale_quote():
+    """The hand-forward case: the quoted block IS the coach's message."""
+    body = ("FYI team\n\n"
+            "---------- Forwarded message ---------\n"
+            "From: Coach Kim <coach@school.edu>\n\n"
+            "> Practice moved to 4pm.\n")
+
+    new_text, quoted = coach_digest.split_reply_quote(body)
+
+    assert quoted == ""                       # nothing discarded as history
+    assert "Practice moved to 4pm." in new_text
+
+
+def test_a_body_that_is_only_a_quote_is_kept_whole():
+    body = "> Bus at 7:15.\n> Bring spikes.\n"
+    new_text, quoted = coach_digest.split_reply_quote(body)
+    assert quoted == "" and "7:15" in new_text
+
+
+def test_prompt_puts_the_correction_last_and_drops_the_redundant_quote():
+    """When the original is shown above in the same thread, the reply's quoted
+    copy of it is dropped: keeping it hands the model a second, STALE statement
+    of the fact being corrected, and it sometimes reports that one instead."""
+    original = mail("<a@mail>", "Saturday meet", "Bus leaves at 7:15 sharp.", 9)
+    reply = mail("<b@mail>", "Re: Saturday meet",
+                 "Correction: bus leaves at 7:00.\n\n"
+                 "On Sun, 9 Aug 2026, Coach Kim wrote:\n> Bus leaves at 7:15 sharp.\n",
+                 10, in_reply_to="<a@mail>")
+
+    prompt = coach_digest.build_prompt([reply, original], date(2026, 8, 11))
+
+    assert "Conversation 1: Saturday meet (2 messages)" in prompt
+    assert "LATER REPLY" in prompt
+    # The correction must be read after the original.
+    assert prompt.index("Bus leaves at 7:15 sharp.") < prompt.index("bus leaves at 7:00")
+    # The stale time appears once (the original), not twice.
+    assert prompt.count("7:15") == 1
+    assert "omitted" in prompt
+
+
+def test_a_quote_is_kept_when_the_original_is_not_in_the_window():
+    """A lone reply whose parent aged out still needs its quoted context — but
+    labelled as history, not as a current statement."""
+    orphan = mail("<b@mail>", "Re: Saturday meet",
+                  "Correction: bus leaves at 7:00.\n\n"
+                  "On Sun, 9 Aug 2026, Coach Kim wrote:\n> Bus leaves at 7:15 sharp.\n",
+                  10)
+
+    prompt = coach_digest.build_prompt([orphan], date(2026, 8, 11))
+
+    assert "historical context" in prompt
+    assert "7:15" in prompt          # context preserved rather than lost
+    assert prompt.index("bus leaves at 7:00") < prompt.index("historical context")
+
+
 def test_prompt_carries_todays_date_and_newest_email_first(db):
     emails = [
         coach_digest.CoachEmail("<new@mail>", "coach@school.edu", "Coach Kim",
@@ -733,6 +881,20 @@ def test_reasoning_is_disabled_by_default(monkeypatch):
     assert "reasoning" not in post.requests[1]["body"]
 
 
+def test_max_tokens_leaves_room_for_reasoning_we_asked_not_to_happen(monkeypatch):
+    """Some providers ignore reasoning.enabled=false. Measured: ~3,900 chars of
+    reasoning burned a 900-token ceiling and returned empty content 2 of 3
+    tries, which the poller reads as a dead model."""
+    post = FakePost(FakeHTTPResponse(payload=completion(GOOD_REPLY)))
+    monkeypatch.setattr(coach_digest.requests, "post", post)
+    monkeypatch.setattr(config, "COACH_DIGEST_MODELS", ["vendor/thinker"])
+
+    coach_digest._call_model("s", "p")
+
+    assert post.requests[0]["body"]["max_tokens"] == config.COACH_DIGEST_MAX_TOKENS
+    assert config.COACH_DIGEST_MAX_TOKENS >= 2000
+
+
 def test_provider_routing_restricts_data_collection(monkeypatch):
     """Coach email names students, so by default only providers that don't
     collect prompts may serve the request."""
@@ -741,6 +903,7 @@ def test_provider_routing_restricts_data_collection(monkeypatch):
     monkeypatch.setattr(config, "COACH_DIGEST_MODELS", ["vendor/a:free"])
     monkeypatch.setattr(config, "COACH_DIGEST_DATA_COLLECTION", "deny")
 
+    monkeypatch.setattr(config, "COACH_DIGEST_IGNORE_PROVIDERS", [])
     coach_digest._call_model("s", "p")
     assert post.requests[0]["body"]["provider"] == {"data_collection": "deny"}
 
@@ -749,6 +912,20 @@ def test_provider_routing_restricts_data_collection(monkeypatch):
     monkeypatch.setattr(config, "COACH_DIGEST_DATA_COLLECTION", "")
     coach_digest._call_model("s", "p")
     assert "provider" not in post.requests[1]["body"]
+
+
+def test_misbehaving_providers_are_routed_around(monkeypatch):
+    """AtlasCloud ignores reasoning.enabled=false and thinks anyway, returning
+    empty content. It advertises support for the flag, so require_parameters
+    doesn't filter it out — it has to be named."""
+    post = FakePost(FakeHTTPResponse(payload=completion(GOOD_REPLY)))
+    monkeypatch.setattr(coach_digest.requests, "post", post)
+    monkeypatch.setattr(config, "COACH_DIGEST_MODELS", ["vendor/a"])
+    monkeypatch.setattr(config, "COACH_DIGEST_IGNORE_PROVIDERS", ["AtlasCloud"])
+
+    coach_digest._call_model("s", "p")
+
+    assert post.requests[0]["body"]["provider"]["ignore"] == ["AtlasCloud"]
 
 
 # --- Wire contract -------------------------------------------------------------

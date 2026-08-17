@@ -179,6 +179,26 @@ fence, take the outermost `{...}`); **an unparsable reply keeps the previous
 digest** rather than overwriting a good summary with nothing. That matters more
 on small free models than it would on a frontier one.
 
+**Replies and corrections (`group_threads` / `split_reply_quote`).** A coach's
+follow-up ("Sorry! Media Day is the 25th!") only lands if the model can tell it
+supersedes the original, so the prompt groups mail into conversations —
+`In-Reply-To`/`References` first, normalized subject as a fallback, and only
+when something in the group carries a `Re:`/`Fwd:` prefix so two unrelated
+same-subject emails aren't merged. Threads run newest-conversation-first, but
+messages **within** a thread run oldest → newest so the last thing read about a
+topic is the latest word on it.
+
+The bigger half is `split_reply_quote`: a reply carries a quoted copy of the
+message it answers, and that copy is the *stale* version of the very fact being
+corrected. Measured on real mail, one reply was **112 chars of correction
+followed by a 3,423-char quote** — so the old flat prompt fed the model the
+original's content twice and the update was 3% of the text. It duly reported the
+superseded date. The quoted tail is now truncated and labelled as history.
+Do **not** strip forwarded blocks this way: `---------- Forwarded message ----------`
+content IS the message, and the hand-forward sender fallback depends on it.
+Gmail wraps the `On ... wrote:` attribution across two lines, so that pattern
+needs `DOTALL` — a single-line version silently leaves it in the new text.
+
 The free tier also has a **daily request cap**, which is the other reason the
 skip-if-unchanged check earns its keep: a quiet inbox costs zero model calls, so
 normal operation is a handful of requests a day, not one per poll.
