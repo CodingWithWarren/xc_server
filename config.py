@@ -118,6 +118,11 @@ COACH_DIGEST_IGNORE_PROVIDERS = [
 
 # Background poll cadence. Every poll is an IMAP fetch; the model is only called
 # when the set of Message-IDs in the window actually changed.
+#
+# 0 disables the background poller while leaving both endpoints working, so
+# POST /coach-digest/refresh can still be used by hand. That is what a second
+# (staging) deployment wants: the mailbox is SHARED, so two pollers would both
+# fetch it every cycle and each pay for its own summarization.
 COACH_POLL_INTERVAL_MINUTES = int(
     os.getenv("COACH_POLL_INTERVAL_MINUTES", "20").strip() or 20)
 

@@ -54,8 +54,14 @@ async def lifespan(app: FastAPI):
     poller = None
     db = SessionLocal()
     try:
-        if coach_digest.sync_team_mailbox_from_env(db) is not None:
+        mailbox = coach_digest.sync_team_mailbox_from_env(db)
+        if mailbox is not None and config.COACH_POLL_INTERVAL_MINUTES > 0:
             poller = asyncio.create_task(coach_digest.run_poller())
+        elif mailbox is not None:
+            # Polling switched off (a staging box sharing prod's mailbox).
+            # The endpoints still work; refresh is on demand only.
+            print("coach digest: background poller disabled "
+                  "(COACH_POLL_INTERVAL_MINUTES=0)")
     finally:
         db.close()
 

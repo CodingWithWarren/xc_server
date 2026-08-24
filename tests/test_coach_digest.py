@@ -1109,3 +1109,14 @@ def test_a_second_refresh_right_behind_the_first_reuses_the_result(db, monkeypat
 
     assert outcome == "already-fresh"
     assert len(model.calls) == 1
+
+
+def test_poll_interval_of_zero_disables_the_background_poller():
+    """A staging deployment shares production's mailbox, so it must not poll:
+    two pollers would each fetch every cycle and each pay to summarize. The
+    endpoints stay up, so refresh still works by hand."""
+    import inspect
+    import main
+    source = inspect.getsource(main.lifespan)
+    assert "COACH_POLL_INTERVAL_MINUTES > 0" in source
+    assert "create_task(coach_digest.run_poller())" in source
