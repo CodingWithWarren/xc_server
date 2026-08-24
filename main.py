@@ -60,8 +60,9 @@ async def lifespan(app: FastAPI):
         elif mailbox is not None:
             # Polling switched off (a staging box sharing prod's mailbox).
             # The endpoints still work; refresh is on demand only.
-            print("coach digest: background poller disabled "
-                  "(COACH_POLL_INTERVAL_MINUTES=0)")
+            coach_digest.log.warning(
+                "coach digest: background poller disabled "
+                "(COACH_POLL_INTERVAL_MINUTES=0); refresh is on demand only")
     finally:
         db.close()
 
