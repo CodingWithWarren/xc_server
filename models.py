@@ -177,6 +177,77 @@ class RouteTrack(Base):
     )
 
 
+class CoachMailbox(Base):
+    """A mailbox the server polls for coach email (see CLAUDE.md "Coach email
+    digest").
+
+    athlete_id is NULL for the shared TEAM mailbox — coach mail is forwarded
+    into one inbox, summarized once, and served to every athlete. A row WITH an
+    athlete_id would scope a mailbox to a single athlete; nothing creates those
+    today, but keeping the column means per-athlete mailboxes drop in later
+    without a schema change (lookup already prefers the athlete's own row)."""
+    __tablename__ = "coach_mailboxes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    athlete_id: Mapped[int | None] = mapped_column(
+        ForeignKey("athletes.id"), nullable=True, unique=True)
+
+    imap_host: Mapped[str] = mapped_column(String, nullable=False)
+    imap_port: Mapped[int] = mapped_column(Integer, nullable=False, default=993)
+    imap_username: Mapped[str] = mapped_column(String, nullable=False)
+    # Encrypted at rest (coach_digest.encrypt_secret). Never serialized, never
+    # logged — no response model or log line may include this column.
+    imap_password_encrypted: Mapped[str] = mapped_column(String, nullable=False)
+    # Comma-separated allow-list of coach addresses/domains; NULL = all mail.
+    sender_filter: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    last_polled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False,
+                                                 default=_utcnow)
+
+
+class CoachMessage(Base):
+    """One email in the current window, keyed by its RFC Message-ID.
+
+    The Message-ID (not the IMAP sequence number) is the dedup key: sequence
+    numbers shift every time new mail lands, so keying on them would re-summarize
+    — and re-bill — on every poll."""
+    __tablename__ = "coach_messages"
+
+    mailbox_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    message_id: Mapped[str] = mapped_column(String, primary_key=True)
+
+    sender: Mapped[str | None] = mapped_column(String, nullable=True)
+    sender_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    subject: Mapped[str | None] = mapped_column(String, nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Plain text only — HTML mail is flattened at ingest, because the mobile
+    # client renders this verbatim and does no sanitizing.
+    body: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    __table_args__ = (
+        Index("ix_coach_messages_mailbox_sent", "mailbox_id", "sent_at"),
+    )
+
+
+class CoachDigest(Base):
+    """The cached summary served by GET /coach-digest. One row per mailbox.
+
+    source_ids is the sorted list of Message-IDs the summary was built from: if
+    the window still holds exactly those ids, nothing changed and the model is
+    not called again."""
+    __tablename__ = "coach_digests"
+
+    mailbox_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    headline: Mapped[str | None] = mapped_column(String, nullable=True)
+    bullets: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    actions: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # When the SERVER produced this summary (naive UTC, like every other
+    # timestamp here). The app renders "Summarized 3h ago" from it.
+    generated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    source_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+
+
 class DetectedSession(Base):
     """A workout session inferred from raw HR + step streams (see detection.py).
     Replaced wholesale per athlete on each (re)detection run."""

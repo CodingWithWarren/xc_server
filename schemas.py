@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # --- Incoming payload (mirrors docs/SERVER_SCHEMA.md: "health_sync") ----------
@@ -225,6 +225,40 @@ class SessionSummary(BaseModel):
 class SessionDetail(SessionSummary):
     """A detected session including its sliced streams (for the detail chart)."""
     raw_payload: dict[str, Any]
+
+
+# --- Coach email digest --------------------------------------------------------
+# The mobile client is already shipped against this shape — field names and
+# nullability are a fixed contract (see CLAUDE.md "Coach email digest").
+# Timestamps are `str`, not `datetime`, on purpose: coach_digest._iso_z has
+# already rendered them as ISO-8601 with an explicit Z, and re-serializing a
+# datetime here would drop the Z and make the client read it as local time.
+
+class CoachDigestOut(BaseModel):
+    headline: str
+    bullets: list[str] = []
+    actions: list[str] = []
+    generated_at: str  # when the SERVER produced the summary, ISO-8601 UTC
+    source_count: int
+
+
+class CoachMessageOut(BaseModel):
+    id: str            # RFC Message-ID
+    from_: str | None = Field(default=None, alias="from")
+    from_name: str | None = None
+    subject: str | None = None
+    date: str | None = None
+    body: str          # plain text — the client renders it verbatim
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class CoachDigestResponse(BaseModel):
+    """Both /coach-digest endpoints return this. `digest` is null and `messages`
+    empty in the legitimate "nothing yet" state; the app renders "No coach email
+    yet". Absence of the feature is a 501, never an empty 200."""
+    digest: CoachDigestOut | None = None
+    messages: list[CoachMessageOut] = []
 
 
 # --- Route tracks --------------------------------------------------------------

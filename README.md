@@ -54,6 +54,8 @@ All data endpoints require `Authorization: Bearer <jwt>` (sign in via
 | `GET` | `/sessions` | List detected sessions (newest first; optional `?athlete_id=`). |
 | `GET` | `/sessions/{id}` | One detected session with its sliced streams. |
 | `GET` | `/stats/weekly` | Total distance per ISO week (for the dashboard chart). |
+| `GET` | `/coach-digest` | The cached summary of the coach's recent email (cheap; never polls). |
+| `POST` | `/coach-digest/refresh` | Poll the mailbox now and re-summarize. |
 | `GET` | `/health` | Liveness check. |
 
 The endpoint is named `/workouts` for legacy reasons; the payload's `type`
@@ -82,6 +84,45 @@ workout. **Session detection** (`detection.py`) recovers those: it scans the
 streams for elevated-HR periods with real movement and writes `detected_sessions`
 (see `GET /sessions`). It runs at ingest and via `POST /detect`.
 
+## Coach email digest
+
+The app's home screen shows a summary of the coach's recent email. Coach mail is
+forwarded into **one shared team mailbox**; the server polls it over IMAP every
+~20 minutes, summarizes it once, and serves the same digest to every athlete.
+The mailbox password and the model API key stay on the server — never in the app
+binary — and one summarization covers the whole team.
+
+Summarization goes through **OpenRouter**, on a cheap paid model with a free one
+behind it — a few cents a month, and the digest keeps working if the balance
+runs out.
+
+Setup (all in `.env`, see `.env.example`):
+
+1. Create the team mailbox and forward coach email into it.
+2. On that Gmail account: turn on 2-Step Verification, create an **App Password**
+   (the account password does not work over IMAP), and enable IMAP under
+   *Settings → Forwarding and POP/IMAP*.
+3. Set `COACH_IMAP_HOST/USERNAME/PASSWORD` and `COACH_SENDERS` (the coach's
+   address, or a bare domain like `@school.edu`).
+4. Get a key at <https://openrouter.ai/keys> and set `OPENROUTER_API_KEY`. The
+   default primary model is paid, so add a little credit to the account;
+   `COACH_DIGEST_MODELS` falls back to a free model if the balance empties.
+   Free list: <https://openrouter.ai/models?max_price=0>.
+
+Leave `COACH_IMAP_*` blank and the feature is off: both endpoints answer `501`
+and the app hides the card. Details and the response contract are in `CLAUDE.md`
+"Coach email digest".
+
+## Testing
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest tests/ -q
+```
+
+Covers the coach email digest (fake IMAP + fake model — no network calls, no
+real database).
+
 ## Project layout
 
 ```
@@ -90,7 +131,9 @@ database.py    SQLAlchemy engine, Base, get_db dependency
 models.py      ORM models: Sync, Workout, HeartRateSample, IntervalSample, DetectedSession
 schemas.py     Pydantic models: HealthSync (+ samples) and API responses
 detection.py   Exercise-session detection from raw HR + step streams
+coach_digest.py  Coach email: IMAP polling, summarization, cached digest
 frontend/      Dashboard (plain HTML/JS/CSS, Chart.js via CDN; an API client)
+tests/         pytest suite (coach email digest)
 requirements.txt
 docs/          -> SERVER_SCHEMA.md (symlinked from the app repo; git-ignored)
 ```
