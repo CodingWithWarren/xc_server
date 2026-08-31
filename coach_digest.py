@@ -35,6 +35,7 @@ import threading
 from dataclasses import dataclass, field as dataclass_field
 from datetime import date, datetime, timedelta, timezone
 from email.message import Message
+from zoneinfo import ZoneInfo
 
 import requests
 from sqlalchemy import delete, select
@@ -121,6 +122,53 @@ class CoachEmail:
     # Default so older call sites (and tests) can build one positionally.
     in_reply_to: str | None = None
     references: list[str] = dataclass_field(default_factory=list)
+
+
+# --- Weekly reset -------------------------------------------------------------
+
+_WEEKDAYS = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+             "friday": 4, "saturday": 5, "sunday": 6}
+
+
+def week_start_cutoff(now_utc: datetime, weekday: str, tz_name: str) -> datetime | None:
+    """Most recent <weekday> at 00:00 local time, returned as naive UTC.
+
+    Local, not UTC: a Sunday-evening bulletin in California is already Monday in
+    UTC, so a UTC-based boundary would put it in the wrong week."""
+    if weekday not in _WEEKDAYS:
+        return None
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        return None
+    local = now_utc.replace(tzinfo=timezone.utc).astimezone(tz)
+    days_since = (local.weekday() - _WEEKDAYS[weekday]) % 7
+    start = (local - timedelta(days=days_since)).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    return start.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def trim_to_current_week(emails: list[CoachEmail],
+                         now_utc: datetime | None = None) -> list[CoachEmail]:
+    """Drop mail from before this week's reset point.
+
+    Returns the list unchanged when the trim would leave nothing: between
+    midnight on the reset day and the new bulletin arriving there IS no
+    current-week mail, and blanking the card for those hours would be worse than
+    briefly showing last week's. The practical effect is that the reset happens
+    when the new weekly email lands."""
+    if not config.COACH_WEEK_STARTS_ON:
+        return emails
+    cutoff = week_start_cutoff(now_utc or _utcnow(),
+                               config.COACH_WEEK_STARTS_ON,
+                               config.COACH_WEEK_TIMEZONE)
+    if cutoff is None:
+        log.warning("coach digest: bad COACH_WEEK_STARTS_ON/TIMEZONE; "
+                    "keeping the full window")
+        return emails
+    # Undated mail is kept — there's no date to judge it by.
+    current = [m for m in emails if m.sent_at is None or m.sent_at >= cutoff]
+    return current or emails
 
 
 # --- Threading: grouping a correction with the message it corrects ------------
@@ -837,7 +885,8 @@ def poll_mailbox(db: Session, mailbox: CoachMailbox, *, force: bool = False,
             # Another request polled while we waited on the lock.
             return "already-fresh"
 
-        emails = fetch_recent(mailbox, imap_factory=imap_factory)
+        emails = trim_to_current_week(
+            fetch_recent(mailbox, imap_factory=imap_factory))
         _store_messages(db, mailbox, emails)
         mailbox.last_polled_at = _utcnow()
 

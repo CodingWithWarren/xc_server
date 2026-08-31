@@ -126,6 +126,21 @@ COACH_DIGEST_IGNORE_PROVIDERS = [
 COACH_POLL_INTERVAL_MINUTES = int(
     os.getenv("COACH_POLL_INTERVAL_MINUTES", "20").strip() or 20)
 
+# The coach sends a bulletin at the start of each week, and last week's mail
+# shouldn't still be in the card once it lands. So the window is additionally
+# trimmed to the current week: everything sent since the most recent
+# COACH_WEEK_STARTS_ON at 00:00 in COACH_WEEK_TIMEZONE.
+#
+# The trim is skipped whenever it would empty the digest — i.e. between midnight
+# on the reset day and the new bulletin actually arriving, last week's mail
+# stays. That makes the reset happen ON ARRIVAL of the new email rather than at
+# a clock time, which is what "resets when the new weekly email comes in" means,
+# and it stops the card going blank for those few hours.
+#
+# Blank COACH_WEEK_STARTS_ON to disable and keep the plain 14-day window.
+COACH_WEEK_STARTS_ON = os.getenv("COACH_WEEK_STARTS_ON", "sunday").strip().lower()
+COACH_WEEK_TIMEZONE = os.getenv("COACH_WEEK_TIMEZONE", "America/Los_Angeles").strip()
+
 # Budget knobs. 14 days / 25 messages / 4000 chars per body is plenty for a
 # season's worth of coach mail and keeps one summarization cheap.
 COACH_WINDOW_DAYS = int(os.getenv("COACH_WINDOW_DAYS", "14").strip() or 14)

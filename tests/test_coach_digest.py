@@ -1120,3 +1120,102 @@ def test_poll_interval_of_zero_disables_the_background_poller():
     source = inspect.getsource(main.lifespan)
     assert "COACH_POLL_INTERVAL_MINUTES > 0" in source
     assert "create_task(coach_digest.run_poller())" in source
+
+
+# --- Weekly reset --------------------------------------------------------------
+
+def week_mail(mid, day_utc, hour=12):
+    return coach_digest.CoachEmail(
+        mid, "coach@school.edu", "Coach Kim", "Cross Country",
+        datetime(2026, 8, day_utc, hour, 0), "body")
+
+
+def test_week_cutoff_is_local_midnight_not_utc_midnight():
+    """A Sunday-evening bulletin in California is already Monday in UTC, so a
+    UTC boundary would file it under the wrong week."""
+    # Sunday 30 Aug 2026, 14:27 Pacific = 21:27 UTC.
+    cutoff = coach_digest.week_start_cutoff(
+        datetime(2026, 8, 30, 21, 27), "sunday", "America/Los_Angeles")
+    assert cutoff == datetime(2026, 8, 30, 7, 0)      # midnight PDT = 07:00 UTC
+
+
+def test_week_cutoff_on_the_reset_day_is_that_morning():
+    """On Sunday itself the week starts today, not seven days ago."""
+    sunday = coach_digest.week_start_cutoff(
+        datetime(2026, 8, 30, 21, 27), "sunday", "America/Los_Angeles")
+    saturday = coach_digest.week_start_cutoff(
+        datetime(2026, 8, 29, 12, 0), "sunday", "America/Los_Angeles")
+    assert sunday == datetime(2026, 8, 30, 7, 0)
+    assert saturday == datetime(2026, 8, 23, 7, 0)    # previous Sunday
+
+
+def test_last_weeks_mail_is_dropped_once_the_new_bulletin_lands(monkeypatch):
+    monkeypatch.setattr(config, "COACH_WEEK_STARTS_ON", "sunday")
+    last_week = [week_mail("<w8@mail>", 23), week_mail("<re-w8@mail>", 25)]
+    this_week = week_mail("<new@mail>", 30, hour=21)
+
+    kept = coach_digest.trim_to_current_week(
+        last_week + [this_week], now_utc=datetime(2026, 8, 30, 22, 0))
+
+    assert [m.message_id for m in kept] == ["<new@mail>"]
+
+
+def test_the_card_is_not_blanked_before_the_new_bulletin_arrives(monkeypatch):
+    """Between midnight on reset day and the email actually arriving there is no
+    current-week mail. Showing last week's briefly beats showing nothing."""
+    monkeypatch.setattr(config, "COACH_WEEK_STARTS_ON", "sunday")
+    last_week = [week_mail("<w8@mail>", 23), week_mail("<re-w8@mail>", 25)]
+
+    # Sunday 08:00 UTC — just past the local reset, nothing new yet.
+    kept = coach_digest.trim_to_current_week(
+        last_week, now_utc=datetime(2026, 8, 30, 8, 0))
+
+    assert [m.message_id for m in kept] == ["<w8@mail>", "<re-w8@mail>"]
+
+
+def test_undated_mail_survives_the_trim(monkeypatch):
+    monkeypatch.setattr(config, "COACH_WEEK_STARTS_ON", "sunday")
+    undated = coach_digest.CoachEmail("<x@mail>", "c@s.edu", "C", "S", None, "b")
+    this_week = week_mail("<new@mail>", 30, hour=21)
+
+    kept = coach_digest.trim_to_current_week(
+        [undated, this_week], now_utc=datetime(2026, 8, 30, 22, 0))
+
+    assert {m.message_id for m in kept} == {"<x@mail>", "<new@mail>"}
+
+
+def test_blank_setting_disables_the_weekly_reset(monkeypatch):
+    monkeypatch.setattr(config, "COACH_WEEK_STARTS_ON", "")
+    mails = [week_mail("<old@mail>", 23), week_mail("<new@mail>", 30)]
+    assert coach_digest.trim_to_current_week(
+        mails, now_utc=datetime(2026, 8, 30, 22, 0)) == mails
+
+
+def test_a_bad_weekday_or_timezone_keeps_the_full_window(monkeypatch):
+    """Misconfiguration must not silently empty the digest."""
+    mails = [week_mail("<old@mail>", 23), week_mail("<new@mail>", 30)]
+    monkeypatch.setattr(config, "COACH_WEEK_STARTS_ON", "funday")
+    assert coach_digest.trim_to_current_week(mails, now_utc=datetime(2026, 8, 30, 22, 0)) == mails
+    monkeypatch.setattr(config, "COACH_WEEK_STARTS_ON", "sunday")
+    monkeypatch.setattr(config, "COACH_WEEK_TIMEZONE", "Mars/Olympus_Mons")
+    assert coach_digest.trim_to_current_week(mails, now_utc=datetime(2026, 8, 30, 22, 0)) == mails
+
+
+def test_poll_applies_the_weekly_reset(db, monkeypatch):
+    """End to end: only this week's mail is stored and summarized."""
+    monkeypatch.setattr(config, "COACH_WEEK_STARTS_ON", "sunday")
+    monkeypatch.setattr(coach_digest, "_utcnow",
+                        lambda: datetime(2026, 8, 30, 22, 0))
+    mailbox = make_mailbox(db)
+    imap = FakeIMAP([
+        raw_email("<w8@mail>", when="Sun, 23 Aug 2026 12:00:00 +0000"),
+        raw_email("<new@mail>", when="Sun, 30 Aug 2026 21:00:00 +0000"),
+    ])
+    model = FakeModel(GOOD_REPLY)
+
+    coach_digest.poll_mailbox(db, mailbox, imap_factory=imap, call_model=model)
+
+    stored = {r.message_id for r in db.scalars(select(CoachMessage)).all()}
+    assert stored == {"<new@mail>"}
+    assert db.get(CoachDigest, mailbox.id).source_ids == ["<new@mail>"]
+    assert "<w8@mail>" not in model.calls[0]

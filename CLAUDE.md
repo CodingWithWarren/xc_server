@@ -179,6 +179,19 @@ fence, take the outermost `{...}`); **an unparsable reply keeps the previous
 digest** rather than overwriting a good summary with nothing. That matters more
 on small free models than it would on a frontier one.
 
+**Weekly reset (`trim_to_current_week`).** The coach sends a bulletin at the
+start of each week, so the 14-day window is additionally trimmed to mail sent
+since the most recent `COACH_WEEK_STARTS_ON` (default Sunday) at 00:00 in
+`COACH_WEEK_TIMEZONE`. The boundary is **local, not UTC** — a Sunday-evening
+bulletin in California is already Monday in UTC and a UTC boundary would file it
+under the wrong week. The trim is **skipped whenever it would leave nothing**:
+between local midnight on reset day and the new bulletin actually arriving there
+is no current-week mail, so the reset effectively happens *when the new email
+lands* rather than at a clock time, and the card never blanks in between. A bad
+weekday or timezone falls back to the full window rather than emptying the
+digest. Note the trim also governs what `_store_messages` keeps, so the
+`messages` array matches what the digest was built from.
+
 **Replies and corrections (`group_threads` / `split_reply_quote`).** A coach's
 follow-up ("Sorry! Media Day is the 25th!") only lands if the model can tell it
 supersedes the original, so the prompt groups mail into conversations —
